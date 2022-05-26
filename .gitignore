@@ -4,6 +4,8 @@
 **/sim_data
 **/result_data
 *.pyc
+*.pyd
+*.cpp
 **/build
 **/dist
 **/*.egg-info
