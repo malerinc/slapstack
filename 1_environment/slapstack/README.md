@@ -12,13 +12,19 @@ The `State` contains several manager objects dedicated to distinct tasks. The `R
 
 The `interface_templates.py` module defines and documents the simulation parameter as well as the `SlapEnv` configuration objects, i.e. `Strategy` for allowing indirect actions and `OutputConverter` for transforming both the state representation and the reward returned by `SlapEnv.step()`.
 
-![slapstack_arch](.\readme\SLAPStack - UML Class.png)
+<p align="center">
+	<img src="readme/SLAPStack - UML Class.png" alt="class_diagram" width="1000"/>
+</p>
+
 
 ### Events
 At the core of the simulation lies the `future_events` queue. `future_events` is a time-sorted heap of self-handling events. During a simulation step, events are popped from this heap and their handle function is called leading to a state update. If a triggered event requires an external ULSP or SLAP decision, the execution halts, and the state is returned.
 Events are either orders or transport events. Orders (`Delivery` or `Retrieval`) get added to the queue during initialization. Transport events (`Delivery/RetrievalFirst/SecondLeg`) are created on-demand. Of the 6 events present in the simulation, 2 are blocking, namely `Retrieval` and `DeliverySecondLeg`. The relationship between them is depicted event chain summary below.
 
-![slapstack_events](.\readme\event_overview.png)
+<p align="center">
+	<img src="readme/event_overview.png" alt="event_chains" width="1000"/>
+</p>
+
 
 ### Routing and Runtime
 
@@ -28,7 +34,10 @@ However, a particularity of SLAPStack is the fine-grained routing mechanism impl
 
 Simulating a total of 400000 orders on CPU take around 2 hours.
 
-![slapstack_routing](.\readme\routing_scheme.png)
+<p align="center">
+	<img src="readme/routing_scheme.png" alt="routing" width="350"/>
+</p>
+
 
 
 ## Use Case Data: WEPAStacks 
@@ -49,13 +58,17 @@ The grid-based warehouse layout shown in the figure below is used to store finis
 
 The warehouse layout is provided as csv-file with numbers from -5 to 0. A -5 represents a travel path, -4 an O-point, -3 an I-point, -2 an aisle, -1 the warehouse boundaries and 0 the available storage locations.
 
-![setup_a_layout_v3](.\readme\setup_a_layout_v3.png)
+<p align="center">
+	<img src="readme/setup_a_layout_v3.png" alt="layout" width="700"/>
+</p>
 
 ### Initial fill level
 
 The initial fill level is a dictionary of Stock Keeping Unit (SKUs) with the respective amount currently on stock at time zero. 
 
-![initial_fill_lvl_1](.\readme\initial_fill_lvl_1.png)
+<p align="center">
+	<img src="readme/initial_fill_lvl_1.png" alt="ini_fill" width="350"/>
+</p>
 
 ### Order stream
 
@@ -63,7 +76,10 @@ The order stream represents the daily in- and outbound flow with the exact arriv
 
 The orders are provided as a nested list. Each order comes with six parameters namely the type (delivery or retrieval), the SKU (number from 1 to 136), the order arrival time (absolute time in seconds counting from zero), the dock door (number from 1 to 4 from top to bottom for delivery and 1 to 10 from left to right for retrieval), the batch number (number of production batches from 1 to 1498 for delivery and of truckload batches from 1 to 7496 for retrieval) and the week number (from 1 to 14).
 
-![order_stream_v1](.\readme\order_stream_v1.png)
+<p align="center">
+	<img src="readme/order_stream_v1.png" alt="orders" width="500"/>
+</p>
+
 
 ## Getting Started
 ### Installation
