@@ -1,0 +1,1 @@
+include slapstack\use_case\Initial_fill_lvl.json slapstack\use_case\Orders_v5.json slapstack\use_case\layouts\layout1_middle_aisles.csv slapstack\use_case\layouts\layout1_mini_middle_aisles.csv

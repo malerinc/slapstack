@@ -1,0 +1,4 @@
+*.html
+*.pyd
+*.cpp
+build
