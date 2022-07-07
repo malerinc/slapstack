@@ -59,7 +59,7 @@ The grid-based warehouse layout shown in the figure below is used to store finis
 The warehouse layout is provided as csv-file with numbers from -5 to 0. A -5 represents a travel path, -4 an O-point, -3 an I-point, -2 an aisle, -1 the warehouse boundaries and 0 the available storage locations.
 
 <p align="center">
-	<img src="[https://i.ibb.co/Bz75S9Q/initial-fill-lvl-1.png](https://user-images.githubusercontent.com/42253045/177733532-0403dc79-6ab6-4ab1-8d34-271feb8aee96.png" alt="setup_a_layout" border="0" width="700">
+	<img src="https://user-images.githubusercontent.com/42253045/177733532-0403dc79-6ab6-4ab1-8d34-271feb8aee96.png" alt="setup_a_layout" border="0" width="500">
 </p>
 
 ### Initial fill level
@@ -67,7 +67,7 @@ The warehouse layout is provided as csv-file with numbers from -5 to 0. A -5 rep
 The initial fill level is a dictionary of Stock Keeping Unit (SKUs) with the respective amount currently on stock at time zero. 
 
 <p align="center">
-	<img src="https://i.ibb.co/Bz75S9Q/initial-fill-lvl-1.png" alt="initial-fill-lvl-1" border="0" width="350">
+	<img src="https://i.ibb.co/Bz75S9Q/initial-fill-lvl-1.png" alt="initial-fill-lvl-1" border="0" width="250">
 </p>
 
 ### Order stream
@@ -77,7 +77,7 @@ The order stream represents the daily in- and outbound flow with the exact arriv
 The orders are provided as a nested list. Each order comes with six parameters namely the type (delivery or retrieval), the SKU (number from 1 to 136), the order arrival time (absolute time in seconds counting from zero), the dock door (number from 1 to 4 from top to bottom for delivery and 1 to 10 from left to right for retrieval), the batch number (number of production batches from 1 to 1498 for delivery and of truckload batches from 1 to 7496 for retrieval) and the week number (from 1 to 14).
 
 <p align="center">
-	<img src="https://i.ibb.co/xYmR7Xr/order-stream-v1.png" alt="order-stream-v1" border="0" width="500">
+	<img src="https://i.ibb.co/xYmR7Xr/order-stream-v1.png" alt="order-stream-v1" border="0" width="350">
 </p>
 
 
