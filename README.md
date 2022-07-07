@@ -59,9 +59,8 @@ The grid-based warehouse layout shown in the figure below is used to store finis
 The warehouse layout is provided as csv-file with numbers from -5 to 0. A -5 represents a travel path, -4 an O-point, -3 an I-point, -2 an aisle, -1 the warehouse boundaries and 0 the available storage locations.
 
 <p align="center">
-	<img src="readme/setup_a_layout_v3.png" alt="layout" width="700"/>
+	<img src="[https://i.ibb.co/Bz75S9Q/initial-fill-lvl-1.png](https://user-images.githubusercontent.com/42253045/177733532-0403dc79-6ab6-4ab1-8d34-271feb8aee96.png" alt="setup_a_layout" border="0" width="700">
 </p>
-![setup_a_layout_v3](https://user-images.githubusercontent.com/42253045/177733532-0403dc79-6ab6-4ab1-8d34-271feb8aee96.png)
 
 ### Initial fill level
 
