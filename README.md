@@ -104,7 +104,7 @@ If you use `SLAPStack` or `WEPAStacks` in your research, you can cite this repos
 ```
 @misc{rinciog2022slapstack
     author = {Rinciog, Alexandru and Pfrommer, Jakob and Morrissey Michael and Sohaib Zahid and Meyer Anne},
-    title = {FabricatioRL},
+    title = {SLAPStack},
     year = {2021},
     publisher = {GitHub},
     journal = {GitHub Repository},
