@@ -77,7 +77,7 @@ The order stream represents the daily in- and outbound flow with the exact arriv
 The orders are provided as a nested list. Each order comes with six parameters namely the type (delivery or retrieval), the SKU (number from 1 to 136), the order arrival time (absolute time in seconds counting from zero), the dock door (number from 1 to 4 from top to bottom for delivery and 1 to 10 from left to right for retrieval), the batch number (number of production batches from 1 to 1498 for delivery and of truckload batches from 1 to 7496 for retrieval) and the week number (from 1 to 14).
 
 <p align="center">
-	<img src="https://i.ibb.co/xYmR7Xr/order-stream-v1.png" alt="order-stream-v1" border="0" width="350">
+	<img src="https://i.ibb.co/xYmR7Xr/order-stream-v1.png" alt="order-stream-v1" border="0" width="400">
 </p>
 
 
@@ -105,7 +105,7 @@ If you use `SLAPStack` or `WEPAStacks` in your research, you can cite this repos
 @misc{rinciog2022slapstack
     author = {Rinciog, Alexandru and Pfrommer, Jakob and Morrissey Michael and Sohaib Zahid and Meyer Anne},
     title = {SLAPStack},
-    year = {2021},
+    year = {2022},
     publisher = {GitHub},
     journal = {GitHub Repository},
     howpublished = {\url{https://github.com/malerinc/slapstack.git}},
