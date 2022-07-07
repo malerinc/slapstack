@@ -61,6 +61,7 @@ The warehouse layout is provided as csv-file with numbers from -5 to 0. A -5 rep
 <p align="center">
 	<img src="readme/setup_a_layout_v3.png" alt="layout" width="700"/>
 </p>
+![setup_a_layout_v3](https://user-images.githubusercontent.com/42253045/177733532-0403dc79-6ab6-4ab1-8d34-271feb8aee96.png)
 
 ### Initial fill level
 
