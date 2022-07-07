@@ -44,7 +44,7 @@ Simulating a total of 400000 orders on CPU take around 2 hours.
 
 This dataset is based on a real-world block stacking warehouse from WEPA.
 
-WEPA is one of the largest hygienic paper manufacturers in Europe with production plants and warehouses in currently six European countries (www.wepa.eu).
+WEPA is one of the largest hygienic paper manufacturers in Europe with production plants and warehouses in currently six European countries.
 
 The dataset consists of three components:
 
