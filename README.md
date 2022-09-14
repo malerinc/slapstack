@@ -1,4 +1,7 @@
 # SLAPStack 
+[![DOI](https://zenodo.org/badge/496690313.svg)](https://zenodo.org/badge/latestdoi/496690313)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+
 SLAPStack is a block-stacking warehouse simulation for the Autonomous Block Stacking Warehouse Problem (ABSWP) [[1]](#pfrommer2020) implementing the [OpenAI](https://gym.openai.com/) gym interface. The code can be used to test out Storage Location Allocation Problem (SLAP) and Unit Load Selection Problem (ULSP) algorithms individually or in conjunction. The simulation project includes the WEPAStacks data which includes the layout and 3 months of order information of a large-scale real-world block stacking warehouse from [WEPA Hygieneprodukte GmbH](https://www.wepa.eu/de/)
 
 ## SLAPStack Simulation
