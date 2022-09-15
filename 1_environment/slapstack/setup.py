@@ -11,8 +11,9 @@ if system() == "Windows":
     f.write("[build]\ncompiler=msvc")
     f.close()
 
-cython_root_dir = sep.join(["slapstack", "extensions"])
+cython_root_dir = join("slapstack", "extensions")
 use_case_target_dir = join("slapstack", "WEPAStacks")
+
 use_case_files = [
     "Initial_fill_lvl.json",
     "Orders_v5.json",
@@ -24,10 +25,14 @@ with open("README.md", 'r') as f:
     long_description = f.read()
 
 with open("MANIFEST.in", "w") as f:
-    f.write("include")
     for file_name in use_case_files:
         dest = join(use_case_target_dir, file_name)
-        f.write(f" {dest}")
+        f.write(f"include {dest}\n")
+    for file_name in listdir(cython_root_dir):
+        if file_name.endswith(".pyx"):
+            dest = join(cython_root_dir, file_name)
+            f.write(f"include {dest}\n")
+    f.write(f'recursive-include slapstack *.pyd')
 
 exts = []
 for cython_source in glob.glob(join(cython_root_dir, "*.pyx")):
@@ -40,8 +45,9 @@ for cython_source in glob.glob(join(cython_root_dir, "*.pyx")):
     )
 
 setup(name='slapstack',
-      version='0.0.1',
-      install_requires=['gym', 'numpy', 'joblib', 'cython', 'json', 'marshal'],
+      version='0.0.24',
+      python_requires='>3.6.8',
+      install_requires=['gym', 'numpy', 'joblib', 'cython'],
       ext_modules=cythonize(
           exts,
           annotate=False,
@@ -53,7 +59,9 @@ setup(name='slapstack',
       long_description_content_type='text/markdown',
       packages=find_packages(),
       package_data={'slapstack': ['WEPAStacks/*.json',
-                                  'WEPAStacks/layouts/*.csv']},
+                                  'WEPAStacks/layouts/*.csv',
+                                  'extensions/*.pyd']},
+      include_package_data=True
       )
 
 if system() == "Windows":
