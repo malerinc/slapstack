@@ -86,7 +86,7 @@ The orders are provided as a nested list. Each order comes with six parameters n
 
 ## Getting Started
 ### Installation
-We publish this project alongside our experiment script and a control package containing various SLAP heuristics as well as a ULSP heuristic. To set up your environment and recreate our experiment results, the following steps can be taken:
+We published this project alongside our experiment script and a control package containing various SLAP heuristics as well as a ULSP heuristic. More details on the experiment setups and results can be found in the associated publication [[2]](#pfrommer2022). To set up your environment and recreate our experiment results, the following steps can be taken:
 1. Cloning the repository:
 	```
 	git clone https://github.com/malerinc/slapstack.git
@@ -100,6 +100,8 @@ We publish this project alongside our experiment script and a control package co
 	```
    python storage_strategy_comparison.py
    ```
+Note that there are two order input streams available within the `WEPAStacks` use-case data contained within the environment project, namely `Orders_v5.json` and `Orders_v6.json`. The latter contains a more balanced distribution of input orders to I-points. The results published in [[2]](#pfrommer2022), however, were obtained using the former.
+
 
 ## Citing the Project
 If you use `SLAPStack` or `WEPAStacks` in your research, you can cite this repository as follows:
@@ -109,20 +111,24 @@ If you use `SLAPStack` or `WEPAStacks` in your research, you can cite this repos
     author = {Rinciog, Alexandru and Pfrommer, Jakob and Morrissey Michael and Sohaib Zahid and Meyer Anne},
     title = {SLAPStack},
     year = {2022},
-    publisher = {GitHub},
+    publisher = {Zenodo},
     journal = {GitHub Repository},
     howpublished = {\url{https://github.com/malerinc/slapstack.git}},
+    doi = {https://doi.org/10.5281/zenodo.7077936}
 }
 ```
 
 ## References
-<a id="pfrommer2020">[1]</a> Pfrommer, J., Meyer, A.: Autonomously organized block stacking warehouses: A
+<a id="pfrommer2020">[1]</a> Pfrommer J., Meyer A.: Autonomously organized block stacking warehouses: A
 review of decision problems and major challenges. Logistics Journal: Proceedings
-2020(12) (2020)
+2020(12) (2020). 10.2195/lj_Proc_pfrommer_en_202012_01
 
-<a id="rinciog2020">[2]</a> Rinciog, A., Meyer, A.: Fabricatio-rl: a reinforcement learning simulation frame-
+<a id="rinciog2020">[2]</a> Rinciog A., Meyer A.: Fabricatio-rl: a reinforcement learning simulation frame-
 work for production scheduling. In: 2021 Winter Simulation Conference (WSC).
-pp. 1–12. IEEE (2021)
+pp. 1–12. IEEE (2021). DOI: 10.1109/WSC52266.2021.9715366
+
+<a id="pfrommer2022">[3]</a> Pfrommer J., Rinciog A., Zahid S., Morissey M., Meyer A.: SLAPStack: A Simulation Framework and a Large-Scale Benchmark Use Case for Autonomous Block Stacking Warehouses. In book: 2022 Computational Logistics. DOI: 10.1007/978-3-031-16579-5_20
+
 
 
 
