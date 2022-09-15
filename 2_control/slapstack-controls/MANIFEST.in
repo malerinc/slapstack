@@ -1,0 +1,1 @@
+include slapstack\WEPAStacks\Initial_fill_lvl.json slapstack\WEPAStacks\Orders_v5.json slapstack\WEPAStacks\layouts\layout1_middle_aisles.csv slapstack\WEPAStacks\layouts\layout1_mini_middle_aisles.csv
