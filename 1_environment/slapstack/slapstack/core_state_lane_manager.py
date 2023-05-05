@@ -1,9 +1,9 @@
-from typing import Tuple, Dict, List, Union, Set, Iterable
+from collections import deque
+from typing import Tuple, Dict, List, Union, Set, Iterable, Deque
 
 import numpy as np
 
-from slapstack.extensions import c_ravel
-from slapstack.helpers import AccessDirection, StorageKeys
+from slapstack.helpers import AccessDirection, StorageKeys, ravel
 from slapstack.interface_templates import SimulationParameters
 
 
@@ -56,6 +56,7 @@ class TileAccessPointIndex:
             # get the aisle tiles in the column
             ap_x, ap_dist = TileAccessPointIndex.__get_access_point(
                 storage_matrix, tile)
+            assert storage_matrix[ap_x, tile[1]] == -5
             assert ap_x
             if tile[0] < ap_x:
                 direction = AccessDirection.ABOVE
@@ -129,6 +130,48 @@ class TileAccessPointIndex:
         return tile_location in self.idx
 
 
+class Lane:
+    def __init__(self, tiles: List[Tuple[int, int]]):
+        self.tiles = tiles
+        self.sku_pos: Dict[int, Deque[Tuple[int, int, int]]] = dict()
+
+    def update_sku_border(self, sku, pos, added=True):
+        # TODO: assertion to ensure that added tile is always below/above prev
+        #  border
+        if added:
+            if sku in self.sku_pos:
+                self.sku_pos[sku].append(pos)
+            else:
+                self.sku_pos[sku] = deque([pos])
+        else:
+            # when pallet shifting, the hole is plugged with the forward pallet
+            # before removing the forward pallet; as such, the pallet to be
+            # removed should be found at the position -2 in the stack
+            stack_top_buff = deque([self.sku_pos[sku].pop()])
+            while stack_top_buff[-1] != pos:
+                stack_top_buff.append(self.sku_pos[sku].pop())
+            pos_popped = stack_top_buff.pop()
+            while stack_top_buff:
+                self.sku_pos[sku].append(stack_top_buff.pop())
+            # pos_popped = self.sku_pos[sku].pop()
+            try:
+                assert pos_popped == pos
+            except AssertionError:
+                print(pos_popped, pos)
+
+    def get_border_tile(self, sku):
+        return self.sku_pos[sku][-1]
+
+    def __getitem__(self, key):
+        return self.tiles[key]
+
+    def __bool__(self):
+        return True if len(self.tiles) else False
+
+    def __len__(self):
+        return len(self.tiles)
+
+
 class LaneManager:
     def __init__(
             self, storage_matrix: np.ndarray, params: SimulationParameters):
@@ -137,7 +180,7 @@ class LaneManager:
         self.locked_lanes = set()
         self.full_lanes = set()
         self.pure_lanes = params.pure_lanes
-        self.sku_lanes = dict()
+        self.sku_lanes: Dict[int, List[Tuple[int, int, int]]] = dict()
         self.lane_assigned = self.create_lane_assigned_dict()
         self.occupied_lanes = dict({})  # maps sku to lanes
         self.S = storage_matrix
@@ -266,15 +309,21 @@ class LaneManager:
             lane_above.reverse()
             lane_below.sort(key=lambda x: x[0])
             lane_clusters_dict_with_keys[access_point.position] = {
-                AccessDirection.BELOW: lane_above,
-                AccessDirection.ABOVE: lane_below
+                AccessDirection.BELOW: Lane(lane_above),
+                AccessDirection.ABOVE: Lane(lane_below)
             }
             n_lanes += 1 if lane_above else 0
             n_lanes += 1 if lane_below else 0
             # {'below': lane_above, 'above': lane_below, 'locked': set()}
         return lane_clusters_dict_with_keys, n_lanes
 
-    def get_lane(self, storage_position: Tuple[int, int, int]):
+    def get_lane(self, storage_position):
+        xy_position = storage_position[0:2]
+        aisle, direction = self.locate_access_point(xy_position)
+        lane: Lane = self.lane_clusters[aisle][direction]
+        return lane
+
+    def get_lane_locations(self, storage_position: Tuple[int, int, int]):
         """
         Returns all the positions in the lane that storage_position belongs to.
 
@@ -282,10 +331,8 @@ class LaneManager:
             all lane positions.
         :return:
         """
-        xy_position = storage_position[0:2]
-        aisle, direction = self.locate_access_point(xy_position)
-        lane = self.lane_clusters[aisle][direction.value]
-        return lane
+        lane = self.get_lane(storage_position)
+        return lane.tiles
 
     def get_access_point_direction(self, storage_position):
         xy_pos = storage_position[0:2]
@@ -346,7 +393,7 @@ class LaneManager:
                 for i in range(self.S.shape[2]):
                     if asint:
                         locations_in_lanes.add(
-                            c_ravel(storage_tile + (i,), self.S.shape))
+                            ravel(storage_tile + (i,), self.S.shape))
                     else:
                         locations_in_lanes.add(storage_tile + (i,))
             # if 'above' in lane_cluster:
@@ -363,7 +410,7 @@ class LaneManager:
             self, storage_position: Tuple[int, int, int], sku: int):
         ap_pos, ap_dir = self.locate_access_point(storage_position[:2])
         self.occupied_lanes[sku][ap_pos][ap_dir].remove(
-            c_ravel(storage_position, self.S.shape))
+            ravel(storage_position, self.S.shape))
         if len(self.occupied_lanes[sku][ap_pos][ap_dir]) == 0:
             del self.occupied_lanes[sku][ap_pos][ap_dir]
         if len(self.occupied_lanes[sku][ap_pos]) == 0:
@@ -380,4 +427,4 @@ class LaneManager:
         if direction not in self.occupied_lanes[sku][aisle]:
             self.occupied_lanes[sku][aisle][direction] = set()
         self.occupied_lanes[sku][aisle][direction].add(
-            c_ravel(storage_location, self.S.shape))
+            ravel(storage_location, self.S.shape))

@@ -12,6 +12,8 @@ from typing import List, Callable, Tuple, Dict, Union
 import numpy as np
 # noinspection PyPackageRequirements, PyProtectedMember
 from joblib._multiprocessing_helpers import mp
+from numpy import ndarray
+
 
 # from slapstack.envs.interface_templates import SimulationParameters
 
@@ -185,7 +187,7 @@ def print_3d_np(np_array, time=False):
 #         initial_pallets_storage_strategy=None,
 #         n_sources=1,
 #         n_sinks=1,
-#         WEPAStacks=None,
+#         use_cases=None,
 #         pure_lanes=False
 #     )
 #     seed = 123456
@@ -317,3 +319,26 @@ class PathKeys:
     STORAGE_TO_AISLE = 7
     STORAGE_TO_STORAGE = 8
     STORAGE_TO_ACCESS = 9
+
+
+def ravel(position: Tuple[int, int, int], dims: Tuple[int, int, int]) -> int:
+    int_position = (position[0] * dims[1] * dims[2]
+                    + position[1] * dims[2] + position[2])
+    return int_position
+
+
+def ravel2(position: Tuple[int, int], shape: Tuple[int, int]) -> int:
+    return position[0] * shape[1] + position[1]
+
+
+def unravel(position_enc: int, dims) -> Tuple[int, int, int]:
+    z: int = position_enc % dims[2]
+    y: int = (position_enc // dims[2]) % dims[1]
+    x: int = (position_enc // dims[2]) // dims[1]
+    return x, y, z
+
+
+def unravel2(int_encoding: int, shape: Tuple[int, int]) -> Tuple[int, int]:
+    y: int = int_encoding % shape[1]
+    x: int = int_encoding // shape[1]
+    return x, y

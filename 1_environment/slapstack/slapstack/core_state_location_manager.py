@@ -3,45 +3,33 @@ from typing import Dict, Tuple, Set, Optional, List, cast, Union, TYPE_CHECKING
 
 import numpy as np
 
-from slapstack.core_state_route_manager import Grid
-from slapstack.core_state_lane_manager import LaneManager
+from slapstack.core_state_lane_manager import LaneManager, Lane
 from slapstack.core_state_zone_manager import ZoneManager
-from slapstack.extensions import c_unravel, c_ravel, get_first_tile
 from slapstack.helpers import (StorageKeys, AccessDirection, TimeKeys,
-                               BatchKeys, faster_deepcopy)
-from slapstack.interface_templates import SimulationParameters
+                               BatchKeys, faster_deepcopy, unravel, ravel)
 
 if TYPE_CHECKING:
-    from slapstack.core_state import TravelEventTrackers
+    from slapstack.core_state import TravelEventTrackers, EventManager
 
 
 class LocationManager:
-    """this class is used for datastructures whose values change frequently,
-    such as open storage locations, occupied storage locations, and free agv
-    positions. It is better computationally because these data structures are
-    updated often instead of needing to search for specific values in matrices.
-
-    open_storage_locations: set
-        open_storage_locations = {(0, 5, 0), (0, 6, 1), ...}
-    occupied_lanes:
-        dictionary[sku : dictionary[aisle:
-            dictionary[lane_direction: occupied_locations]]]
-        occupied_lanes = {
-            1: {(0, 1): {
-                "above": [(0, 5, 1), (0, 6, 1)],
-                "below": []
-            }, {(0, 2): ...
-                ...
-                ...
-            },
-            2: ...
-        }
-    free_agv_positions: set
-        free_agv_positions = {(0, 5, 0), (0, 6, 1), ...}
     """
-    def __init__(self, storage_matrix: np.ndarray, vehicle_matrix: np.ndarray,
-                 arrival_matrix: np.ndarray, batch_id_matrix: np.ndarray,
-                 params: SimulationParameters, lane_manager: LaneManager):
+    This class is used for datastructures whose values change frequently,
+    such as open storage locations, occupied storage locations, and free agv
+    positions.
+
+    Attributes:
+        open_storage_locations (Set[int]): Locations in lanes which can be used
+        next for storage. For all lanes, the only location usable for storage is
+        the one directly adjacent to the last occupied lane location, or, if the
+        lane is empty, the first lane position from the back. Not to be confused
+        with the total number of open locations (n_open_locations).
+
+        ...
+    """
+    def __init__(self, storage_matrix: np.ndarray, arrival_matrix: np.ndarray,
+                 batch_id_matrix: np.ndarray, lane_manager: LaneManager,
+                 events: 'EventManager'):
         self.S = storage_matrix
         self.T = arrival_matrix
         self.B = batch_id_matrix
@@ -49,10 +37,7 @@ class LocationManager:
         self.n_levels = storage_matrix.shape[2]
         self.lane_manager = lane_manager
         self.zone_manager = ZoneManager()
-        # These correspond to one location per lane which can be used next
-        # for storage. It does not represent all of the open locations.
-        # There is no correlation between len(self.open_storage_locations) and
-        # self.n_open_locations or self.n_unlocked_open_locations.
+
         # The length of this list can be at most equal to the number of lanes.
         self.open_storage_locations = self.find_open_locations()
         self.open_storage_loc_prev = set()
@@ -64,7 +49,6 @@ class LocationManager:
         # locations from lanes reserved for 1st delivery legs being executed.
         self.reserved_locations = set()
 
-        self.grid = Grid(storage_matrix)
         self.sku_pick_time = {}
         self.sku_cycle_time: Dict[int, float] = {}
         # cycle_time = alpha * cycle_time + (1-alpha) * current_cycle_time
@@ -84,7 +68,7 @@ class LocationManager:
         self.n_actions_taken = 0
         # Conditional
         self.lane_wise_entropies = {
-            (aisle, direction): 1
+            (aisle, direction): 0
             for aisle, dirs in self.lane_manager.lane_clusters.items()
             for direction, locs in dirs.items()
         }
@@ -97,7 +81,25 @@ class LocationManager:
                 for direction, locs in dirs.items()
             }
         self.n_total_locations_per_lane = self.n_open_locations_per_lane.copy()
+        self.events = events
+        self.sink_location = None
+        self.source_location = None
+        outline = self.S[:, :, 0]
+        io_locations = np.argwhere((outline == StorageKeys.SOURCE)
+                                   | (outline == StorageKeys.SINK))
+        self.raveled_io_locs = [ravel(tuple(i) + (0,), self.S.shape)
+                                for i in io_locations]
         # self.perform_sanity_check()
+
+    def set_source_location(self, source_loc: int):
+        """
+        Used in cross-docking to force the next delivery event to go from dock
+        to dock. See BatchLIFO retrieval policy.
+
+        :param source_loc:
+        :return:
+        """
+        self.source_location = source_loc
 
     def perform_sanity_check(self):
         """
@@ -134,7 +136,7 @@ class LocationManager:
     # TODO: move all distance/routing computation to this class
     def get_free_spaces_in_lane(self, storage_location):
         assert storage_location[0:2] in self.lane_manager.tile_access_points
-        tiles_in_lane = self.lane_manager.get_lane(storage_location)
+        tiles_in_lane = self.lane_manager.get_lane_locations(storage_location)
         assert storage_location[0:2] in tiles_in_lane
         n_free_spaces = 0
         for tile in tiles_in_lane:
@@ -163,8 +165,8 @@ class LocationManager:
                 self.open_storage_loc_prev = self.open_storage_locations
                 self.reserved_locations = set()
                 for loc_i in self.open_storage_locations:
-                    loc = c_unravel(loc_i, self.S.shape)
-                    locations = self.lane_manager.get_lane(loc)
+                    loc = unravel(loc_i, self.S.shape)
+                    locations = self.lane_manager.get_lane_locations(loc)
                     for loc in locations:
                         for level in range(self.n_levels):
                             self.reserved_locations.add(loc + (level,))
@@ -178,7 +180,7 @@ class LocationManager:
         if self.locked_occupied_storage != set({}):
             exclusion_set = set()
             for loc in self.locked_occupied_storage:
-                loc_tup = c_unravel(loc, self.S.shape)
+                loc_tup = unravel(loc, self.S.shape)
                 exclusion_set.add(loc_tup)
             locations = set.difference(locations, exclusion_set)
         reserved_locs = self.get_locs_lanes_reserved_for_delivery(tes)
@@ -209,12 +211,13 @@ class LocationManager:
         delivery_action_to_return = None
         retrieval_actions_to_return = []
         # go through each stack in the lane
+        # TODO: consider using Lane object to eliminate loop
         for stack in stacks_in_lane:
             # go through each level in a stack
             for i in range(self.n_levels):
                 position = (stack + (i,))
                 # if there is a legal delivery action, lock it
-                if self.ravel(position) in self.open_storage_locations:
+                if ravel(position, self.S.shape) in self.open_storage_locations:
                     delivery_action_to_return = position
                     self.__add_locked_open_location(position)
                     self.__discard_open_location(position)
@@ -245,19 +248,23 @@ class LocationManager:
         self.sku_pick_time.setdefault(sku, []).append(time)
 
     def find_open_locations(self) -> Set[int]:
-        """intended to be used in initialization, when storage matrix is empty.
-        goes through each lane and gets the tuple for the storage location
-         furthest from the middle aisle"""
+        """
+        Creates a list of open locations immediately after simulation
+        initialization, when all lanes are empty.
+
+        Since this method is called exactly once, the overhead incurred by
+        looping is acceptable.
+
+        :return: A list of open locations in raveled form.
+        """
         open_locations = set({})
         for _, lanes in self.lane_manager.lane_clusters.items():
             if lanes[AccessDirection.ABOVE]:
-                open_locations.add(
-                    c_ravel(
-                        lanes[AccessDirection.ABOVE][0] + (0, ), self.S.shape))
+                open_locations.add(ravel(
+                    lanes[AccessDirection.ABOVE][0] + (0, ), self.S.shape))
             if lanes[AccessDirection.BELOW]:
-                open_locations.add(
-                    c_ravel(
-                        lanes[AccessDirection.BELOW][0] + (0, ), self.S.shape))
+                open_locations.add(ravel(
+                    lanes[AccessDirection.BELOW][0] + (0, ), self.S.shape))
         return open_locations
 
     def update_legal_actions_statistics(self):
@@ -352,9 +359,13 @@ class LocationManager:
         Raises KeyError when trying to remove an inexistent position from the
         cache.
         """
-        self.occupied_locations[pallet_sku].remove(self.ravel(storage_position))
+        self.occupied_locations[pallet_sku].remove(
+            ravel(storage_position, self.S.shape))
         self.lane_manager.remove_from_occupied_lane(
             storage_position, pallet_sku)
+        tgt_lane: Lane = self.lane_manager.get_lane(storage_position)
+        tgt_lane.update_sku_border(pallet_sku, storage_position, added=False)
+
 
     def assert_storage_and_time_are_similar(self, storage_location):
         if self.S[storage_location] > StorageKeys.EMPTY:  # if storage
@@ -389,7 +400,6 @@ class LocationManager:
             # self.open_storage_locations.discard(storage_location)
             self.__discard_open_location(storage_location)
             self.__open_next_location(storage_location)
-            self.grid.add_obstacle(storage_location[:2])
             # self.assert_storage_and_time_are_similar(storage_location)
 
         return shift_penalty
@@ -408,31 +418,11 @@ class LocationManager:
             shift_penalty, location = self.__shift_pallets_in_lane(location)
         else:
             shift_penalty = 0
-        self.grid.remove_obstacle(location[0:2])
         # self.assert_storage_and_time_are_similar(location)
         # if lane is empty, unassign it
         if self.lane_manager.pure_lanes:
             self.lane_manager.unassign_empty_lane(location, sku)
         return shift_penalty
-
-    def find_sku_previous_location(
-            self, storage_location: Tuple[int, int, int]) -> int:
-        """
-        UNUSED.
-
-        :param storage_location:
-        :return:
-        """
-        previous_position = list(storage_location)
-        previous_position[2] = previous_position[2] - 1
-        if previous_position[2] < 0:  # if stack is full
-            # TODO: Check if lane is already empty and
-            #  we're going out of bounds.
-            previous_position[2] = self.n_levels - 1
-            direction = self.lane_manager.get_access_point_direction(
-                tuple(storage_location))
-            previous_position[0] = previous_position[0] + direction
-        return max(self.S[tuple(previous_position)], StorageKeys.EMPTY)
 
     def __open_next_location(self, storage_location: Tuple[int, int, int]):
         """
@@ -456,9 +446,13 @@ class LocationManager:
 
     # <editor-fold desc="SHIFT MECHANISM">
     def __shift_needed(self, storage_position: Tuple[int, int, int]) -> bool:
-        """returns true if the current position is empty and the next position
-        is not
+        """
+        Checks if the retrieval of a pallet leads to the formation of a hole in
+        the lane (i.e. an unoccupied position surrounded by occupied locations).
 
+        :param storage_position: The position from which a pallet is to be
+            retrieved.
+        :return: True whether the retrieval creates a hole.
         """
         shift_candidate, _, _ = self.__get_shift_src(storage_position)
         if self.S[tuple(shift_candidate)] \
@@ -498,9 +492,18 @@ class LocationManager:
 
     def __shift_pallets_in_lane(
             self, storage_location) -> (int, Tuple[int, int, int]):
-        """go through each pallet in a lane and move it one space away from the
-        aisle to prevent holes from. also gives a penalty for each pallet that
-        needed to be shifted"""
+        """
+        Goes through each pallet in a lane and moves it one space away from the
+        aisle to prevent holes from forming. A penalty proportional to the
+        number of shifts required to circumvent the hole formation is returned.
+
+        If the retrieval indicated by the storage_location parameter does not
+        create a hole, no action is taken.
+
+        :param storage_location: The location from which a pallet is retrieved.
+        :return: A tuple containing the number of shifts and the new position of
+            an empty tile.
+        """
         self.__discard_open_location(storage_location)
         # shift all pallets that are closer to aisle (or above retrieved pallet)
         shift_src, shift_tgt, direction = self.__get_shift_src(storage_location)
@@ -508,7 +511,7 @@ class LocationManager:
         while not (self.lane_manager.is_lane(shift_src)
                    or self.is_empty(tuple(shift_src))):
             # perform shift!
-            self.__shift_pallet(direction, shift_src, shift_tgt)
+            self.__shift_pallet(shift_src, shift_tgt)
             self.zone_manager.update_any_out_of_zone_sku_locations(
                 shift_src, shift_tgt, self.S[tuple(shift_tgt)]
             )
@@ -518,10 +521,16 @@ class LocationManager:
         self.__add_open_location(released_tile)
         return shift_penalty, released_tile
 
-    def __shift_pallet(self, direction, shift_src, shift_tgt):
-        """shifts one pallet one position away from the middle aisle in order
-        to 'plug up' holes. then gets next two positions to check if a shift is
-        needed"""
+    def __shift_pallet(self, shift_src, shift_tgt):
+        """
+        Updates the simulation structures reflecting the shift of a pallet from
+        shift_src (the next hole) to shift_tgt (the previous hole).
+
+        :param shift_src: The previous position of the pallet in lane
+            (now a hole).
+        :param shift_tgt: The next position of the pallet to be shifted.
+        :return: None.
+        """
         next_hole = tuple(shift_src)
         ex_hole = tuple(shift_tgt)
         shift_sku = self.S[next_hole]
@@ -533,7 +542,6 @@ class LocationManager:
         self.B[next_hole] = BatchKeys.NAN.value  # -1
         self.__add_pallet(ex_hole, shift_sku)
         self.__remove_pallet(next_hole, shift_sku)
-
     # <editor-fold desc="SHIFT MECHANISM">
 
     def __add_pallet(
@@ -541,11 +549,14 @@ class LocationManager:
         """adds storage location tuple for new pallets to add to
          occupied_lanes"""
         self.lane_manager.add_to_occupied_lane(storage_location, pallet_sku)
+        tgt_lane: Lane = self.lane_manager.get_lane(storage_location)
+        tgt_lane.update_sku_border(pallet_sku, storage_location, added=True)
         if pallet_sku not in self.occupied_locations:
-            self.occupied_locations[pallet_sku] = {self.ravel(storage_location)}
+            self.occupied_locations[pallet_sku] = {
+                ravel(storage_location, self.S.shape)}
         else:
             self.occupied_locations[pallet_sku].add(
-                self.ravel(storage_location))
+                ravel(storage_location, self.S.shape))
 
     def is_empty(self, next_position):
         """returns true if storage position is empty"""
@@ -554,43 +565,38 @@ class LocationManager:
         else:
             return False
 
-    def ravel(self, position: Tuple[int, int, int]) -> int:
-        """changes tuple (13, 6, 1) to integer 138"""
-        # assert isinstance(position, Tuple)
-        return c_ravel(position, self.S.shape)
-
     def __add_open_location(self, position: Tuple[int, int, int]):
         """takes a position tuple (3,1,4) and ravels it into one integer (154)
          based on the dimensions of the warehouse then adds it
          to the open_storage_location set."""
         if position is None:
             return
-        self.open_storage_locations.add(self.ravel(position))
+        self.open_storage_locations.add(ravel(position, self.S.shape))
 
     def __discard_open_location(self, position):
         if position is None:
             return
-        self.open_storage_locations.discard(self.ravel(position))
+        self.open_storage_locations.discard(ravel(position, self.S.shape))
 
     def __add_locked_open_location(self, position):
         if position is None:
             return
-        self.locked_open_storage.add(self.ravel(position))
+        self.locked_open_storage.add(ravel(position, self.S.shape))
 
     def __discard_locked_open_location(self, position):
         if position is None:
             return
-        self.locked_open_storage.discard(self.ravel(position))
+        self.locked_open_storage.discard(ravel(position, self.S.shape))
 
     def __add_locked_occupied_location(self, position):
         if position is None:
             return
-        self.locked_occupied_storage.add(self.ravel(position))
+        self.locked_occupied_storage.add(ravel(position, self.S.shape))
 
     def __discard_locked_occupied_location(self, position):
         if position is None:
             return
-        self.locked_occupied_storage.discard(self.ravel(position))
+        self.locked_occupied_storage.discard(ravel(position, self.S.shape))
 
     def get_open_locations(self, sku=None) -> Set[int]:
         """returns list of open storage locations. removes locations that are
@@ -644,9 +650,9 @@ class LocationManager:
         for key, value in self.lane_manager.lane_assigned.items():
             if not value:   # if lane not assigned
                 unassigned_lanes.add(key)
-        unassigned_lane_locations = self.lane_manager.get_locations_in_lanes(
-            unassigned_lanes, asint=True)
-
+        unassigned_lane_locations: Set[int] = (
+            self.lane_manager.get_locations_in_lanes(
+                unassigned_lanes, asint=True))
         return set.intersection(unassigned_lane_locations,
                                 set(self.get_open_locations()))
 
@@ -678,6 +684,9 @@ class LocationManager:
         #         locations = self.get_actions_closest_to_aisle(sku)
         #         self.occupied_locations_cache[sku] = locations
         # else:
+        if self.source_location:
+            locations = {self.source_location}
+            return locations
         if sku in self.occupied_locations and self.occupied_locations[sku]:
             locations = (self.occupied_locations[sku]
                          - self.locked_occupied_storage)
@@ -699,20 +708,22 @@ class LocationManager:
     #     self.B[p[0], p[1], p[2]] = b_value
 
     def __get_first_suitable_tile(
-            self, lane: List[Tuple[int, int]], sku: int) -> Union[int, None]:
+            self, lane: Lane, sku: int) -> Union[int, None]:
         """
-        Note that the tiles within the lanes in the lane_cluster datastructure
-        are sorted descendingly with respect to their distance from the closest
-        aisle.
+        Given a lane and an sku, this method finds the sku position in the lane
+        which is closest to the aisle. Raises an error if the SKU is not
+        contained in the lane (see get_border_tile in Lane class), the retrieved
+        tile is not present in the occupied_locations[sku] or the tile is
+        present in the locked storage.
 
-        TODO: finish comment
-        :param lane:
-        :param sku:
-        :return:
+        :param lane: The lane object to retrieve the border sku tile from.
+        :param sku: The sku for which to retrieve the border tile.
+        :return: The border sku tile in raveled form.
         """
-        int_loc = get_first_tile(
-            self.occupied_locations[sku], self.locked_occupied_storage,
-            lane, len(lane), self.n_levels, self.S.shape)
+        location = lane.get_border_tile(sku)
+        int_loc = ravel(location, self.S.shape)
+        assert int_loc in self.occupied_locations[sku]
+        assert int_loc not in self.locked_occupied_storage
         return int_loc
 
     def get_actions_closest_to_aisle(
@@ -731,10 +742,10 @@ class LocationManager:
         if sku not in self.lane_manager.sku_lanes:
             return set({})
         else:
-            for lane in self.lane_manager.sku_lanes[sku]:
+            for lane_ap in self.lane_manager.sku_lanes[sku]:
                 direction = (AccessDirection.ABOVE
-                             if lane[2] == -1 else AccessDirection.BELOW)
-                lane = self.lane_manager.lane_clusters[lane[0:2]][direction]
+                             if lane_ap[2] == -1 else AccessDirection.BELOW)
+                lane = self.lane_manager.lane_clusters[lane_ap[0:2]][direction]
                 int_loc = self.__get_first_suitable_tile(lane, sku)
                 if int_loc is not None:
                     closest_pallets.add(int_loc)
@@ -742,3 +753,23 @@ class LocationManager:
 
     def __deepcopy__(self, memo):
         return faster_deepcopy(self, memo)
+
+    def get_direct_sink_action(self, sku):
+        """
+        Checks if there is an order requiring the SKU passed as a parameter
+        waiting at one of the sink tiles.
+
+        :param sku: The order to check.
+        :return: The sink location requiring the sku or None if no such sink
+            location exists.
+        """
+        events = self.events
+        sink_location = None
+        if events.queued_retrieval_orders.get(sku):
+            retrieval_orders = events.queued_retrieval_orders.get(sku)
+            if len(retrieval_orders) > 0:
+                retrieval_order = retrieval_orders[0]
+                self.sink_location = self.raveled_io_locs[retrieval_order.sink]
+            else:
+                self.sink_location = None
+        return sink_location

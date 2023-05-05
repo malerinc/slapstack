@@ -1,7 +1,1 @@
-include slapstack\WEPAStacks\Initial_fill_lvl.json
-include slapstack\WEPAStacks\Orders_v5.json
-include slapstack\WEPAStacks\layouts\layout1_middle_aisles.csv
-include slapstack\WEPAStacks\layouts\layout1_mini_middle_aisles.csv
-include slapstack\extensions\c_dijkstra.pyx
-include slapstack\extensions\c_helpers.pyx
-recursive-include slapstack *.pyd
+include slapstack\use_cases\wepastacks\1_layout.csv slapstack\use_cases\wepastacks\2_orders.json slapstack\use_cases\wepastacks\3_initial_fill_lvl.json slapstack\use_cases\crossstacks\1_layout.csv slapstack\use_cases\crossstacks\2_orders.json slapstack\use_cases\crossstacks\3_initial_fill_lvl.json

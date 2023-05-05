@@ -1,18 +1,16 @@
 from copy import deepcopy
-from typing import Tuple, Dict, List, Set
+from typing import Tuple, Dict, List, Set, Union
 
-from slapstack_controls.extensions.control_helpers import (get_oldest_batch,
-                                                           count_sku)
-from slapstack.core import State
+from slapstack.core_state_agv_manager import AGV
+
+from slapstack.core import State, SlapCore
 from collections import namedtuple, defaultdict
 import heapq as h
 import numpy as np
 
-from slapstack.core_events import Order
-from slapstack.core_state_route_manager import Route
+from slapstack.core_events import Order, Retrieval
 from slapstack.core_state_location_manager import LocationManager
-from slapstack.extensions.c_helpers import c_ravel, c_unravel
-from slapstack.helpers import print_3d_np, AccessDirection
+from slapstack.helpers import AccessDirection, unravel, ravel
 from slapstack.interface_templates import StorageStrategy
 
 OpenLocation = namedtuple('OpenLocation', ['distance', 'arrival_time', 'xyz'])
@@ -27,14 +25,10 @@ class StorageLane:
 SKU = namedtuple('SKU', ['sku', 'popularity', 'maximum_inventory', 'COI'])
 
 
-def get_distance(src: np.ndarray, dest: Tuple[int, int], state: State):
+def get_distance(src: Union[np.ndarray, Tuple[int, int]],
+                 dest: Tuple[int, int], state: State):
     if state:
-        # sort storage locations by how long it takes to reach it, rather
-        # than the euclidean distance. AGVs can't take a straight line to
-        # storage locations.
-        route = Route(state.routing, state.location_manager.grid, src,
-                      dest, through_pallet_weight=100)
-        return route.get_duration()
+        return state.routing.get_distance(src, dest)
 
 
 class KeyHeap(object):
@@ -49,11 +43,11 @@ class KeyHeap(object):
             self.data = []
 
     def push(self, item):
-        h.heappush(self.data, (self.key(item), item))
         self.index += 1
+        h.heappush(self.data, (self.key(item), self.index, item))
 
     def pop(self):
-        return h.heappop(self.data)[1]
+        return h.heappop(self.data)[2]
 
 
 class StoragePolicy(StorageStrategy):
@@ -62,7 +56,7 @@ class StoragePolicy(StorageStrategy):
         self.name = 'storage_policy'
         self.init = init
 
-    def get_action(self, state: State):
+    def get_action(self, state: State, core: SlapCore = None):
         raise NotImplementedError
 
 
@@ -77,68 +71,197 @@ class RetrievalPolicy(StorageStrategy):
 class RandomOpenLocation(StoragePolicy):
     def __init__(self):
         super().__init__()
+        self.name = 'RND'
 
-    def get_action(self, state: State):
+    def get_action(self, state: State, slap_core=None):
         assert state.location_manager.get_open_locations(state.current_sku)
-        return np.random.choice(state.location_manager.get_open_locations(
-            state.current_sku))
+        if state.door_to_door:
+            sink_location = state.location_manager.\
+                get_direct_sink_action(state.current_sku)
+            if sink_location:
+                return sink_location
+        return np.random.choice(list(state.location_manager.get_open_locations(
+            state.current_sku)))
 
 
-class ClosestOpenLocation(StoragePolicy):
+class DistanceBasedStrategy(StoragePolicy):
     def __init__(self, very_greedy=False):
         super().__init__()
         self.very_greedy = very_greedy
-        self.name = f'{"VeryGreedy" if very_greedy else ""} COL'
 
-    def get_action(self, state: State) -> int:  # alex's idea
-        src = state.source_positions[state.current_source_sink]
+    def get_action(self, state, core: SlapCore = None):
+        pass
+
+    def _get_open_locations(self, state: State) -> Tuple[List[int], bool]:
+        immediate_return = False
+        sku = state.current_sku
+        if state.door_to_door:
+            sink_location = state.location_manager.get_direct_sink_action(sku)
+            if sink_location:
+                return [sink_location], True
         if self.very_greedy:
             open_locations = state.location_manager.get_open_locations()
         else:
-            sku = state.current_sku
             open_locations = state.location_manager.get_open_locations(sku)
-        shortest_distance = 99999
+        return open_locations, immediate_return
+
+    @staticmethod
+    def _get_closest(src, open_locations, state, offset=0):
+        shortest_distance = np.infty
         closest_tgt_loc = None
         for loc in open_locations:
-            loc_tuple = c_unravel(loc, state.S.shape)
-            distance = get_distance(src, loc_tuple[:2], state)
+            loc_tuple = unravel(loc, state.S.shape)
+            distance = np.abs(get_distance(src, loc_tuple[:2], state) - offset)
             if distance < shortest_distance:
                 shortest_distance = distance
                 closest_tgt_loc = loc
         return closest_tgt_loc
 
 
-class BestLane(StoragePolicy):
-    def __init__(self):
-        super().__init__()
+class ClosestOpenLocation(DistanceBasedStrategy):
+    def __init__(self, very_greedy=False):
+        super().__init__(very_greedy)
+        self.name = f'{"VeryGreedy" if very_greedy else ""} COL'
 
-    def get_action(self, state: State) -> int:
-        src = state.source_positions[state.current_source_sink]
-        open_locations = state.location_manager.get_open_locations()
-        # norm = np.sqrt(np.square(open_locations[0] - src[0]) +
-        #                np.square(open_locations[1] - src[1]))
-        # distances = []
-        shortest_distance = 99999
-        closest_tgt_loc = None
-        sc = state.location_manager
-        for loc in open_locations:
-            loc_tuple = c_unravel(loc, state.S.shape)
-            ap_pos, _ = sc.lane_manager.locate_access_point(loc_tuple[:2])
-            distance = get_distance(src, ap_pos, state)
-            if distance < shortest_distance:
-                shortest_distance = distance
-                closest_tgt_loc = loc
-        # closest = np.argmin(np.array(distances))
+    def get_action(self, state: State, slap_core=None) -> int:
+        src = state.I_O_positions[state.current_source_sink]
+        open_locations, immediate_return = super()._get_open_locations(state)
+        if immediate_return:
+            return open_locations[0]
+        closest_tgt_loc = super()._get_closest(src, open_locations, state)
         return closest_tgt_loc
 
 
-class BatchLIFO(RetrievalPolicy):
+class ClosestToDestination(DistanceBasedStrategy):
+    def __init__(self, very_greedy=False):
+        super().__init__(very_greedy)
+        self.name = f'{"VeryGreedy" if very_greedy else ""} CTD'
+
+    def get_action(self, state: State, slap_core=None) -> int:
+        assert state.current_destination
+        destination = state.I_O_positions[state.current_destination]
+        open_locations, immediate_return = super()._get_open_locations(state)
+        if immediate_return:
+            return open_locations[0]
+        closest_tgt_loc = super()._get_closest(
+            destination, open_locations, state)
+        return closest_tgt_loc
+
+
+class ClosestToNextRetrieval(DistanceBasedStrategy):
+    def __init__(self, very_greedy=False):
+        super().__init__(very_greedy)
+        self.name = f'{"VeryGreedy" if very_greedy else ""} CTNR'
+
+    def get_action(self, state: State, core: SlapCore = None) -> int:
+        src = state.I_O_positions[state.current_source_sink]
+        order: Union[None, Retrieval] = None
+        open_locations, immediate_return = super()._get_open_locations(state)
+        if immediate_return:
+            return open_locations[0]
+        retrieval_location = None
+        sc, tes = state.location_manager, state.trackers.travel_event_statistics
+        if state.location_manager.events.available_retrieval(state):
+            order: Retrieval = state.location_manager.events. \
+                pop_queued_retrieval_order()
+            locations = sc.get_sku_locations(order.SKU, tes)
+            retrieval_location = unravel(list(locations)[0], state.S.shape)[0:2]
+        if retrieval_location:
+            agv: AGV = state.agv_manager.agv_index[core.previous_event.agv_id]
+            src = agv.position
+            agv.dcc_retrieval_order.append(order)
+        closest_tgt_loc = super()._get_closest(
+            src, open_locations, state, offset=0)
+        return closest_tgt_loc
+
+
+class ShortestLeg(DistanceBasedStrategy):
+    def __init__(self, very_greedy=False):
+        super().__init__(very_greedy)
+        self.olus = {}  # contains unraveled open locations
+        self.name = f'{"VeryGreedy" if very_greedy else ""} SLO'
+
+    @staticmethod
+    def find_distance(loc, state, ret_loc):
+        loc_tuple = unravel(loc, state.S.shape)
+        action = unravel(ret_loc, state.S.shape)
+        return get_distance(action[:2], loc_tuple[:2], state)
+
+    def __get_shortest_leg_delivery(self, open_locations, ev, state):
+        sc, tes = state.location_manager, state.trackers.travel_event_statistics
+        src = state.I_O_positions[state.current_source_sink]
+        d_min, ret_loc_min = np.infty, None
+        closest_tgt_loc, order = None, None
+        for sku, retrieval_orders in ev.queued_retrieval_orders.items():
+            # TODO: reimplement for non unique skus
+            tgt = retrieval_orders[0].sink
+            tgt = state.I_O_positions[tgt]
+            # O(#filled slots log(#free space))
+            ret_locations = sc.get_sku_locations(sku, tes)
+            if not bool(ret_locations):
+                # Should never happen. raise error?
+                continue
+            for loc in ret_locations:
+                slu = unravel(loc, state.S.shape)[:2]
+                d_retrieval = get_distance(slu, tgt, state)
+                for ol in open_locations:
+                    if ol in self.olus:
+                        olu = self.olus[ol]
+                    else:
+                        olu = unravel(ol, state.S.shape)[:2]
+                        self.olus[ol] = olu
+                    d_storage = get_distance(src, olu, state)
+                    d_inner = get_distance(olu, slu, state)
+                    d_new = d_storage + d_inner + d_retrieval
+                    if d_new < d_min:
+                        d_min = d_new
+                        closest_tgt_loc = ol
+                        order = retrieval_orders[0]
+        return closest_tgt_loc, order
+
+    def get_action(self, state: State, core: SlapCore = None):
+        src = state.I_O_positions[state.current_source_sink]
+        open_locations, immediate_ret = super()._get_open_locations(state)
+        if immediate_ret:
+            return open_locations[0]
+        ev = state.location_manager.events
+        closest_distance = 99999
+        closest_tgt_loc = None
+        if ev.available_retrieval(state):
+            closest_tgt_loc, order = (
+                self.__get_shortest_leg_delivery(
+                    open_locations, ev, state))
+            agv: AGV = state.agv_manager.agv_index[
+                core.previous_event.agv_id]
+            agv.dcc_retrieval_order.append(order)
+            ev.queued_retrieval_orders[order.SKU].popleft()
+            core.events.n_queued_retrieval_orders -= 1
+            if len(ev.queued_retrieval_orders[order.SKU]) == 0:
+                del ev.queued_retrieval_orders[order.SKU]
+        else:
+            for loc in open_locations:
+                loc_tuple = unravel(loc, state.S.shape)
+                distance = get_distance(src, loc_tuple[:2], state)
+                if distance < closest_distance:
+                    closest_distance = distance
+                    closest_tgt_loc = loc
+        return closest_tgt_loc
+
+
+class BatchFIFO(RetrievalPolicy):
     def __init__(self):
         super().__init__()
+        self.delivery_orders = None
+        self.dock_locations = None
+
+    def __assign_fields(self, s: State):
+        self.delivery_orders = s.location_manager.events.queued_delivery_orders
+        if self.dock_locations is None:
+            self.dock_locations = State.get_io_locations(s.S)
 
     def get_action(self, state: State):
         """
-        Chooses an sku position to pick from the warehouse as per the
+        Chooses a sku position to pick from the warehouse as per the
         following priority scheme:
             1. Out of zone items first.
             2. LIFO on arrival times.
@@ -150,17 +273,25 @@ class BatchLIFO(RetrievalPolicy):
         """
         ooz_skus = state.location_manager.get_out_of_zone_sku_locations(
             state.current_sku, state.trackers.travel_event_statistics)
+        self.__assign_fields(state)
         if ooz_skus != set({}):
             sku_pos = ooz_skus
         else:
-            sku_pos = state.location_manager.get_sku_locations(
-                state.current_sku, state.trackers.travel_event_statistics)
-            sku_pos = [(c_unravel(i, state.S.shape)) for i in sku_pos]
-        pos = tuple(get_oldest_batch(
-            sku_pos, state.B, state.T, state.location_manager.batch_arrivals))
+            if (state.params.door_to_door
+                    and state.current_sku in self.delivery_orders):
+                delivery_order = self.delivery_orders[state.current_sku][0]
+                src_loc_u = self.dock_locations[delivery_order.source] + (0,)
+                source_location = ravel(src_loc_u, state.S.shape)
+                state.location_manager.set_source_location(source_location)
+                sku_pos = [src_loc_u]
+            else:
+                sku_pos = state.location_manager.get_sku_locations(
+                    state.current_sku, state.trackers.travel_event_statistics)
+                sku_pos = [(unravel(i, state.S.shape)) for i in sku_pos]
+        pos = tuple(BatchFIFO.__get_oldest_batch(sku_pos, state))
         state.location_manager.zone_manager.remove_out_of_zone_location(
             state.current_sku, pos)
-        action = c_ravel(pos, state.S.shape)
+        action = ravel(pos, state.S.shape)
         return action
 
     @staticmethod
@@ -168,7 +299,6 @@ class BatchLIFO(RetrievalPolicy):
         """
         Pure python implementation of the cythonised function in
         control_helpers. Useful for debugging.
-
 
         :param sku_pos: The list of action (sku locations) candidates to chose
             from.
@@ -186,7 +316,7 @@ class BatchLIFO(RetrievalPolicy):
             assert arrival_time != -1
             # decide if location is a candidate
             if batch_arrival_time > max_batch_arrival:
-                min_batch_arrival = batch_arrival_time
+                # min_batch_arrival = batch_arrival_time
                 target_loc_info = (loc, arrival_time)
             elif batch_arrival_time == max_batch_arrival:
                 if arrival_time > target_loc_info[1]:
@@ -285,8 +415,7 @@ class ClassBasedStorage(StoragePolicy):
                                   f"directly as it is an abstract class.")
 
     def assign_sorted_skus_to_zones(self, sorted_skus: List[int],
-                                    storage_ratio_per_sku: Dict[int, float],
-                                    n_skus: int):
+                                    storage_ratio_per_sku: Dict[int, float]):
         """
         This function assigns skus to zones based on the provided order.
         The ratio of SKUs assigned to each zone is decided on the basis
@@ -298,12 +427,11 @@ class ClassBasedStorage(StoragePolicy):
             to some external criteria
         :param storage_ratio_per_sku: a dictionary where the key is sku and the
             value is the proportion of storage that SKU needs to be allocated
-        :param n_skus: total number of possible SKUs
         :return: A dictionary indexed by integers representing SKUs with
             integer values corresponding to the SKU zone; the dictionary
             represents the new zone assignment.
         """
-        # by default, assign all skus to least desirable zone
+        # by default, assign all skus to the least desirable zone
         sku_zones = defaultdict(int)
 
         sku_counts = np.array([storage_ratio_per_sku[sku]
@@ -359,7 +487,7 @@ class ClassBasedStorage(StoragePolicy):
             )
         self.n_steps += 1
 
-    def get_action(self, state: State):
+    def get_action(self, state: State, slap_core=None):
         """
         Returns an action based on the current sku to zone distribution. First
         the zone associated with the current sku is identified. If there are
@@ -369,6 +497,7 @@ class ClassBasedStorage(StoragePolicy):
 
         If needed, this function also recomputes the sku to zone assignment.
 
+        :param slap_core: The simulation core; unused.
         :param state: The current warehouse state.
         :return: The closest open location in the sku target zone, or the
             ooz closest open location if the zone is full.
@@ -382,12 +511,25 @@ class ClassBasedStorage(StoragePolicy):
             open_locations = state.location_manager.get_open_locations(sku)
         else:
             open_locations = state.location_manager.legal_actions
+            locations_max_entropy_max_skus = self.\
+                get_locations_max_entropy_max_pallets(state, open_locations)
+            if locations_max_entropy_max_skus and\
+                    len(locations_max_entropy_max_skus) > 0:
+                open_locations = locations_max_entropy_max_skus
+        if state.door_to_door:
+            sink_location = state.location_manager. \
+                get_direct_sink_action(state.current_sku)
+            if sink_location:
+                open_locations.clear()
+                open_locations.add(sink_location)
+                return sink_location
         locations_in_zone = self.zones_by_location[zone_to_deliver]
+        # action retrieval in a single loop over open locations ;)
         iz_min_dist, ooz_min_dist = np.infty, np.infty
         iz_action, ooz_action = None, None
-        src = np.array(state.source_positions[state.current_source_sink])
+        src = np.array(state.I_O_positions[state.current_source_sink])
         for location in open_locations:
-            tgt_loc = c_unravel(location, state.S.shape)
+            tgt_loc = unravel(location, state.S.shape)
             if tgt_loc in locations_in_zone:
                 d = get_distance(src, tgt_loc[:2], state)
                 if d < iz_min_dist:
@@ -399,7 +541,7 @@ class ClassBasedStorage(StoragePolicy):
                     ooz_action = tgt_loc
         # update ooz in state cache, if necessary, and return
         if iz_action is not None:
-            return c_ravel(iz_action, state.S.shape)
+            return ravel(iz_action, state.S.shape)
         else:
             state.location_manager.zone_manager.add_out_of_zone_sku(
                 ooz_action, sku, buffer=True)
@@ -407,23 +549,7 @@ class ClassBasedStorage(StoragePolicy):
                 assert ooz_action
             except AssertionError:
                 print('herehere')
-            return c_ravel(ooz_action, state.S.shape)
-
-    @staticmethod
-    def get_location_min_entropy(state, open_locations) -> int:
-        min_entropy = -np.infty
-        lowest_entropy_location = None
-        sc = state.state_cache
-        for location in open_locations:
-            unravel_location = c_unravel(location, state.S.shape)
-            ap_pos, ap_dir = sc.lane_manger.locate_access_point(
-                unravel_location[:2])
-            entropy = state.state_cache.lane_wise_entropies[
-                (ap_pos, ap_dir)]
-            if entropy > min_entropy:
-                lowest_entropy_location = location
-                min_entropy = entropy
-        return lowest_entropy_location
+            return ravel(ooz_action, state.S.shape)
 
     @staticmethod
     def get_locations_max_entropy_max_pallets(
@@ -435,28 +561,29 @@ class ClassBasedStorage(StoragePolicy):
         other_max_sku_locations = set()
         no_sku_aisle_direction_locations = set()
         for location in open_locations:
-            unravel_location = c_unravel(location, state.S.shape)
-            ap_pos, ap_dir = sc.lane_manager.locate_access_point(
-                unravel_location[:2])
-            entropy = sc.lane_wise_entropies[(ap_pos, ap_dir)]
-            if entropy > max_entropy:
-                highest_entropy_locations = set()
-                highest_entropy_locations.add(location)
-                max_entropy = entropy
-            elif entropy == max_entropy:
-                highest_entropy_locations.add(location)
-            if (sc.lane_wise_sku_counts.get(ap_pos)
-                    and sc.lane_wise_sku_counts[ap_pos].get(ap_dir)):
-                total_skus = list(
-                    sc.lane_wise_sku_counts[ap_pos][ap_dir].values())
-                if len(total_skus) > lane_wise_max_sku:
-                    other_max_sku_locations = set()
-                    other_max_sku_locations.add(location)
-                    lane_wise_max_sku = len(total_skus)
-                elif len(total_skus) == lane_wise_max_sku:
-                    other_max_sku_locations.add(location)
-            else:
-                no_sku_aisle_direction_locations.add(location)
+            unravel_location = unravel(location, state.S.shape)
+            if unravel_location[:2] in sc.lane_manager.tile_access_points:
+                ap_pos, ap_dir = sc.lane_manager.locate_access_point(
+                    unravel_location[:2])
+                entropy = sc.lane_wise_entropies[(ap_pos, ap_dir)]
+                if entropy > max_entropy:
+                    highest_entropy_locations = set()
+                    highest_entropy_locations.add(location)
+                    max_entropy = entropy
+                elif entropy == max_entropy:
+                    highest_entropy_locations.add(location)
+                if (sc.lane_wise_sku_counts.get(ap_pos)
+                        and sc.lane_wise_sku_counts[ap_pos].get(ap_dir)):
+                    total_skus = list(
+                        sc.lane_wise_sku_counts[ap_pos][ap_dir].values())
+                    if len(total_skus) > lane_wise_max_sku:
+                        other_max_sku_locations = set()
+                        other_max_sku_locations.add(location)
+                        lane_wise_max_sku = len(total_skus)
+                    elif len(total_skus) == lane_wise_max_sku:
+                        other_max_sku_locations.add(location)
+                else:
+                    no_sku_aisle_direction_locations.add(location)
         return other_max_sku_locations.union(highest_entropy_locations,
                                              no_sku_aisle_direction_locations)
 
@@ -480,35 +607,16 @@ class ClassBasedStorage(StoragePolicy):
         return zone_to_deliver
 
     @staticmethod
-    def __check_action_integrity(action: Tuple[int, int, int], state: State):
-        """
-        Checks whether the action is not None, has a length of 2 and that the
-        (x, y) coordinates of the action correspond to an aisle.
-
-        :param action: The action to be checked.
-        :param state: The warehouse state.
-        :return: None.
-        """
-        assert action
-        assert len(action) == 3
-        if action[0:2] not in state.location_manager.lane_manager.closest_aisle:
-            print_3d_np(state.S)
-            print(action)
-            print()
-        assert action[0:2] in state.location_manager.lane_manager.closest_aisle
-        return c_ravel(action, state.S.shape)
-
-    @staticmethod
     def get_average_distance_to_access_points(state, lane_aisle_access):
         """used to find most desirable locations. gets the average distance
         from the middle aisle lane access point to all source tiles (up to
         10) and all sink tiles (up to 4)"""
         distances = []
-        sc = state.state_cache
-        for source in state.source_positions:
+        # sc = state.state_cache
+        for source in state.I_O_positions:
             distances.append(get_distance(source, lane_aisle_access, state))
-        for sink in state.sink_positions:
-            distances.append(get_distance(sink, lane_aisle_access, state))
+        # for sink in state.sink_positions:
+        #     distances.append(get_distance(sink, lane_aisle_access, state))
         return sum(distances)/len(distances)
 
     def calculate_zones(self, state: State):
@@ -522,9 +630,6 @@ class ClassBasedStorage(StoragePolicy):
         """
         lanes: Dict[Tuple[int, int], Dict[str, List[Tuple[int, int]]]]
         lanes = state.location_manager.lane_manager.lane_clusters
-        middle_source = int(len(state.source_positions)/2)
-        # measure distance from this source tile to each lane aisle access tile
-        src = state.source_positions[middle_source]
         lane_heap = KeyHeap([], key=lambda x: x.distance)
         for lane_aisle_access in lanes:
             lane = StorageLane(
@@ -538,7 +643,7 @@ class ClassBasedStorage(StoragePolicy):
         for i in range(self.n_zones):
             lane_section = lane_list[zone_indices[i]: zone_indices[i + 1]]
             for lane in lane_section:
-                zones[i].append(lane[1].location)
+                zones[i].append(lane[2].location)
         return zones
 
     @staticmethod
@@ -555,45 +660,16 @@ class ClassBasedStorage(StoragePolicy):
         :param lane_aisle_access:
         :return:
         """
-        distances = []
+        # distances = []
         sum_d = 0
         n_pts = 0
-        for sink in state.sink_positions:
+        for sink in state.I_O_positions:
             sum_d += get_distance(sink, lane_aisle_access, state)
             n_pts += 1
-        for src in state.source_positions:
-            sum_d += get_distance(src, lane_aisle_access, state)
-            n_pts += 1
+        # for src in state.source_positions:
+        #     sum_d += get_distance(src, lane_aisle_access, state)
+        #     n_pts += 1
         return sum_d / n_pts
-
-    def draw_zones(self, state):
-        """
-        UNUSED FUNCTION!
-
-        Used for visualization, creates a string of a matrix with the same
-        size as the warehouse to show what zone each storage location is in.
-
-        :param state:
-        :return:
-        """
-        zone_matrix = np.full((state.S.shape[0], state.S.shape[1]), -1)
-        for zone, locations_in_zone in self.zones_by_location.items():
-            for loc in locations_in_zone:
-                zone_matrix[(loc[0], loc[1])] = zone
-        output_string = ""
-        for col in range(0, zone_matrix.shape[1]):
-            output_string += "{}".format(col).rjust(3)
-        output_string += "\n"
-        row = 0
-        for s in zone_matrix:
-            output_string += "{}".format(row).rjust(3)
-            for elem in s:
-                if elem == -1:
-                    elem = "-"
-                output_string += "{}".format(elem).rjust(3)
-            row += 1
-            output_string += "\n"
-        return output_string
 
     def create_zones_by_locations(self, state: State):
         """creates zones_by_locations"""
@@ -693,10 +769,10 @@ class ClassBasedPopularity(ClassBasedStorage):
         self.retrieval_orders_only = retrieval_orders_only
         self.name = name
 
-    def compute_orders_per_sku(
+    def __compute_orders_per_sku(
             self, order_list: List[Order]):
-        order_counts = dict()
-        order_counts = count_sku(order_list, self.retrieval_orders_only)
+        # order_counts = dict()
+        order_counts = self.__count_sku(order_list)
         # for order in order_list:
         #     if self.retrieval_orders_only and order.type != 'retrieval':
         #         continue
@@ -705,6 +781,18 @@ class ClassBasedPopularity(ClassBasedStorage):
         #         order_counts[sku] += 1
         #     else:
         #         order_counts[sku] = 1
+        return order_counts
+
+    def __count_sku(self, order_list):
+        order_counts: Dict[int, int] = {}
+        for order in order_list:
+            if self.retrieval_orders_only and order.type != 'retrieval':
+                continue
+            sku = order.SKU
+            if sku in order_counts:
+                order_counts[sku] += 1
+            else:
+                order_counts[sku] = 1
         return order_counts
 
     def assign_skus_to_zones(self, state: State) -> (
@@ -755,13 +843,13 @@ class ClassBasedPopularity(ClassBasedStorage):
             nfo = len(state.trackers.finished_orders)
             first_order = 0 if self.n_orders > nfo else -self.n_orders
             count_base = state.trackers.finished_orders[first_order:]
-            order_counts = self.compute_orders_per_sku(count_base)
+            order_counts = self.__compute_orders_per_sku(count_base)
         popularity_sorted_skus = sorted(list(order_counts.keys()),
                                         key=lambda x: -order_counts[x])
         sku_zones = self.assign_sorted_skus_to_zones(
             sorted_skus=popularity_sorted_skus,
             storage_ratio_per_sku=order_counts,
-            n_skus=state.params.n_skus
+            # n_skus=state.params.n_skus
         )
         return sku_zones, previous_sku_zones
 
@@ -802,7 +890,7 @@ class ClassBasedCycleTime(ClassBasedStorage):
         sku_zones = self.assign_sorted_skus_to_zones(
             popularity_sorted_skus,
             state.location_manager.sku_counts,
-            state.params.n_skus
+            # state.params.n_skus
         )
 
         return sku_zones, previous_sku_zones

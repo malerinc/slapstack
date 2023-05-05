@@ -4,9 +4,8 @@ from slapstack.core_state_route_manager import RouteManager
 from slapstack.core_state_agv_manager import AgvManager
 from slapstack.core_state_lane_manager import LaneManager
 from slapstack.core_state_location_manager import LocationManager
-from slapstack.extensions.c_helpers import c_unravel
 
-from typing import List, Union, TYPE_CHECKING
+from typing import List, Union, TYPE_CHECKING, Tuple
 import sys
 
 from collections import defaultdict
@@ -14,8 +13,8 @@ from slapstack.helpers import faster_deepcopy, StorageKeys, TravelEventKeys
 from slapstack.interface_templates import SimulationParameters
 
 if TYPE_CHECKING:
-    from slapstack.core_events import (EventManager, DeliveryFirstLeg,
-                                       RetrievalSecondLeg, Order)
+    from slapstack.core_events import EventManager, Order, DeliveryFirstLeg
+    from slapstack.core_events import RetrievalSecondLeg, RetrievalFirstLeg
 
 
 class TravelEventTrackers:
@@ -32,6 +31,7 @@ class TravelEventTrackers:
         self.d_delivery_2nd_leg = 0
         self.d_retrieval_1st_leg = 0
         self.d_retrieval_2nd_leg = 0
+        self.total_shift_distance = 0
         self.t_delivery_1st_leg = 0
         self.t_delivery_2nd_leg = 0
         self.t_retrieval_1st_leg = 0
@@ -40,6 +40,9 @@ class TravelEventTrackers:
         self.total_travel_time = 0
         self.total_distance_traveled = 0
         self.last_travel_distance = 0
+        self.avg_dy = 0
+        self.avg_dx = 0
+        self.avg_count = 0
 
     @staticmethod
     def __get_suffix(event_key: TravelEventKeys):
@@ -56,16 +59,18 @@ class TravelEventTrackers:
         return attr_suffix
 
     def __update_trackers(
-            self, distance: float, duration: float, attr_suffix: str):
+            self, distance: float, duration: float, shift_distance: float,
+            attr_suffix: str, mark_complete):
         self.total_distance_traveled += distance
         self.total_travel_time += duration
-        if not distance:  # event was just initialized
+        if not mark_complete:  # event was just initialized
             assert duration == 0.
             setattr(self, f'n_running_{attr_suffix}',
                     getattr(self, f'n_running_{attr_suffix}') + 1)
         else:  # eent has ended
             self.total_finished_travel += 1
             self.last_travel_distance = distance
+            self.total_shift_distance += shift_distance
             setattr(self, f'n_running_{attr_suffix}',
                     getattr(self, f'n_running_{attr_suffix}') - 1)
             setattr(self, f'd_{attr_suffix}',
@@ -76,10 +81,13 @@ class TravelEventTrackers:
                     getattr(self, f'n_finished_{attr_suffix}') + 1)
 
     def update_travel_events(self, event: TravelEventKeys,
-                             duration: float = 0, distance: float = 0):
+                             duration: float = 0, distance: float = 0,
+                             shift_distance: float = 0,
+                             is_completion: bool = False):
         attr_suffix = self.__get_suffix(event)
         self.__update_trackers(
-            distance=distance, duration=duration, attr_suffix=attr_suffix)
+            distance=distance, duration=duration, attr_suffix=attr_suffix,
+            shift_distance=shift_distance, mark_complete=is_completion)
 
     def get_unbound_travel_events(self):
         return self.n_running_delivery_1st_leg
@@ -145,7 +153,7 @@ class Trackers:
         # flag
         self.compute_feature_trackers: bool = compute_feature_trackers
 
-    def update_on_order_completion(self, order: 'Order'):
+    def update_on_order_completion(self, order: 'Order', distance_penalty=0.0):
         self.finished_orders.append(order)
         service_time = order.completion_time - order.time
         self.total_service_time += service_time
@@ -163,9 +171,11 @@ class Trackers:
         self.travel_event_statistics.update_travel_events(travel_type)
 
     def update_on_travel_event_completion(
-            self, travel_type: TravelEventKeys, duration, distance):
+            self, travel_type: TravelEventKeys, duration, distance,
+            shift_distance):
         self.travel_event_statistics.update_travel_events(
-            travel_type, duration=duration, distance=distance)
+            travel_type, duration=duration, distance=distance,
+            shift_distance=shift_distance, is_completion=True)
 
     def get_fill_level(self):
         return self.n_pallets_in_storage / self.n_storage_locations
@@ -249,9 +259,10 @@ class State:
         self.V = self.agv_manager.V  # Location of Vehicles
         lane_manager = LaneManager(self.S, params)
         self.routing = RouteManager(
-            lane_manager, self.S, params.agv_speed, params.unit_distance)
+            lane_manager, self.S, params.agv_speed, params.unit_distance,
+            params.use_case_name)
         self.location_manager = LocationManager(
-            self.S, self.V, self.T, self.B, params, lane_manager)
+            self.S, self.T, self.B, lane_manager, events)
         # KPIs and trackers
         self.trackers = Trackers(events, params.compute_feature_trackers)
         # simple progression trackers
@@ -260,10 +271,7 @@ class State:
         self.n_silent_steps = 0
         self.n_skus_inout_now = defaultdict(int)
         # paths relevant variables
-        self.source_positions = State.get_source_locations(self.S)
-        self.sink_positions = State.get_sink_locations(self.S)
-        self.routing.precompute_paths(
-            self.source_positions + self.sink_positions)
+        self.I_O_positions = State.get_io_locations(self.S)
         self.routes = set()
         # past event links
         self.current_order: Union[str, None] = None
@@ -274,6 +282,13 @@ class State:
         self.incomplete_orders = {}
         self.travel_events = {}
         self.done = False
+        self.current_destination = None
+        self.door_to_door = params.door_to_door
+
+    def get_mid_aisles(self):
+        mid_aisles = [tuple(i[0:2]) for i in np.argwhere(self.S[:, :, 0] ==
+                                                         StorageKeys.MID_AISLE)]
+        return mid_aisles
 
     @staticmethod
     def __init_storage_matrix(p: SimulationParameters) -> np.ndarray:
@@ -390,7 +405,7 @@ class State:
         return self.trackers.average_service_time / 60
 
     def add_travel_event(
-            self, travel_event: Union['DeliveryFirstLeg',
+            self, travel_event: Union['DeliveryFirstLeg', 'RetrievalFirstLeg',
                                       'RetrievalSecondLeg', None]):
         """adds a Travel event to self.travel_events"""
         if travel_event:
@@ -405,13 +420,20 @@ class State:
 
             self.travel_events[t.order.order_number] = parameters
 
-    def delivery_possible(self):
+    def delivery_possible(self, agv_pos: Tuple[int, int] = None,
+                          index: int = None) -> bool:
         sc, tes = self.location_manager, self.trackers.travel_event_statistics
         n_open_lanes = (sc.lane_manager.n_lanes
                         - len(sc.lane_manager.locked_lanes)
                         - len(sc.lane_manager.full_lanes))
         n_unbound_delivery = tes.get_unbound_travel_events()
-        return n_open_lanes > n_unbound_delivery
+        if agv_pos is not None and index is not None:
+            n_forks = self.agv_manager.free_agv_positions[agv_pos][index].forks
+            return n_open_lanes - (n_forks - 1) >\
+                n_unbound_delivery
+        else:
+            return n_open_lanes - (self.agv_manager.maximum_forks - 1) >\
+                n_unbound_delivery
 
     def retrieval_possible(self, sku: int):
         """returns true if the given SKU is serviceable"""
@@ -477,6 +499,19 @@ class State:
         """called once. gets location of tiles marked as sink"""
         return [tuple(i[0:2]) for i in
                 np.argwhere(storage_matrix[:, :, 0] == StorageKeys.SINK)]
+
+    @staticmethod
+    def get_io_locations(storage_matrix: np.ndarray):
+        """called once. gets location of tiles marked as source and sink"""
+        source_positions = [tuple(i[0:2]) for i in
+                            np.argwhere(storage_matrix[:, :, 0] ==
+                                        StorageKeys.SOURCE)]
+
+        sink_positions = [tuple(i[0:2]) for i in
+                          np.argwhere(storage_matrix[:, :, 0] ==
+                                      StorageKeys.SINK)]
+
+        return source_positions + sink_positions
 
     def concatenate(self):
         """"reshapes multi-level/3D storage and time matrices, then concatenates
@@ -671,9 +706,28 @@ class State:
         self.trackers.update_on_travel_event_creation(travel_type)
 
     def update_on_travel_event_completion(
-            self, travel_type: TravelEventKeys, duration, distance: float):
+            self, travel_type: TravelEventKeys, duration, distance: float,
+            penalty: float):
         self.trackers.update_on_travel_event_completion(
-            travel_type, duration, distance)
+            travel_type, duration, distance, penalty)
+
+    def update_when_vehicle_free(self, end_position: Tuple[int, int]):
+        """
+        Updates the vehicle position running averages.
+
+        :param end_position: The position of the freed vehicle.
+        :return: None.
+        """
+        tes = self.trackers.travel_event_statistics
+        avg = tes.avg_dx
+        n = tes.avg_count + 1
+        tes.avg_dx = (avg * (n - 1)) / n + end_position[0] / n
+        avg = tes.avg_dy
+        tes.avg_dy = (avg * (n - 1)) / n + end_position[1] / n
+        tes.avg_count += 1
+
+    def set_current_destination(self, destination):
+            self.current_destination = destination
 
     def __deepcopy__(self, memo):
         return faster_deepcopy(self, memo)

@@ -8,7 +8,7 @@ from slapstack.interface_templates import SimulationParameters
 
 
 class AGV:
-    def __init__(self, transport_id: int, pos: Tuple[int, int]):
+    def __init__(self, transport_id: int, pos: Tuple[int, int], forks=1):
         """
         AGV object constructor. Instances of this class represent the warehouse
         transports.
@@ -21,6 +21,10 @@ class AGV:
         self.free = True
         self.booking_time = -1
         self.utilization = 0
+        self.forks = forks
+        self.servicing_order_type = None
+        self.available_forks = self.forks
+        self.dcc_retrieval_order = []
 
     def log_booking(self, booking_time: float):
         """
@@ -69,6 +73,7 @@ class AgvManager:
         self.agv_index: Dict[int, AGV] = {}
         self.V = np.full((p.n_rows, p.n_columns),
                          VehicleKeys.N_AGV.value, dtype='int8')
+        self.maximum_forks = p.n_forks
         self.__initialize_agvs(storage_matrix, rng, p.n_agvs)
         self.n_free_agvs = len(self.free_agv_positions)
         self.n_busy_agvs = 0
@@ -88,9 +93,10 @@ class AgvManager:
         for i in range(0, n_agvs):
             index = rng.integers(0, len(storage_locations))
             pos_t = tuple(storage_locations[index])
+            no_forks = self.maximum_forks
             if pos_t in self.free_agv_positions:
                 continue
-            new_agv = AGV(transport_id, pos_t)
+            new_agv = AGV(transport_id, pos_t, no_forks)
             self.free_agv_positions[pos_t] = [new_agv]
             self.agv_index[transport_id] = new_agv
             transport_id += 1
@@ -135,16 +141,29 @@ class AgvManager:
             self, position: Tuple[int, int], system_time: float, agv_id: int):
         self.release_agv(position, system_time, agv_id)
 
-    def agv_available(self) -> bool:
+    def agv_available(self, order_type='retrieval', only_new=False) -> bool:
         """
         Checks if there are any available AGVs to use for transport.
 
         :return: True if the free_agv_positions dictionary is not empty and
             false otherwise.
         """
-        return bool(self.free_agv_positions)
+        is_free_agv = False
+        for agv_pos in self.free_agv_positions:
+            for current_agv in self.free_agv_positions[agv_pos]:
+                if only_new:
+                    if current_agv.servicing_order_type is None:
+                        is_free_agv = True
+                elif current_agv.servicing_order_type == order_type\
+                        or current_agv.servicing_order_type is None:
+                    is_free_agv = True
+                    break
+            if is_free_agv:
+                break
+        return is_free_agv
 
-    def book_agv(self, position: Tuple[int, int], system_time: float):
+    def book_agv(self, agv_pos: Tuple[int, int], system_time: float,
+                 agv_id: int, order_type: str):
         """
         Called whenever a fist leg transport event starts. Depending on the
         event trigger position (source for delivery first leg or chosen pallet
@@ -160,15 +179,20 @@ class AgvManager:
         :param position: The position of the triggering event (either source or
             chosen sku).
         :param system_time: The current simulation time.
+        #TODO reword docstring comments to reflect the external agv selection
         :return: The AGV booked AGV.
         """
-        selected_agv_pos = self.__get_close_agv(position)
-        agv = self.free_agv_positions[selected_agv_pos].pop()
-        agv.log_booking(system_time)
-        self.n_busy_agvs += 1
-        self.n_free_agvs -= 1
-        if not self.free_agv_positions[selected_agv_pos]:
-            del self.free_agv_positions[selected_agv_pos]
+        agv = self.free_agv_positions[agv_pos][agv_id]
+        if agv.available_forks == agv.forks:
+            agv.log_booking(system_time)
+            agv.servicing_order_type = order_type
+        agv.available_forks -= 1
+        if agv.available_forks == 0:
+            self.n_busy_agvs += 1
+            self.n_free_agvs -= 1
+            self.free_agv_positions[agv_pos].pop(agv_id)
+        if not self.free_agv_positions[agv_pos]:
+            del self.free_agv_positions[agv_pos]
         return agv
 
     def release_agv(self, position, system_time: float, agv_id: int):
@@ -192,14 +216,36 @@ class AgvManager:
         """
         released_agv = self.agv_index[agv_id]
         released_agv.log_release(system_time, position)
-        if position in self.free_agv_positions:
+        if position in self.free_agv_positions\
+                and released_agv.available_forks == 0:
             self.free_agv_positions[position].append(released_agv)
-        else:
+            self.n_busy_agvs -= 1
+            self.n_free_agvs += 1
+        elif released_agv.available_forks == 0:
             self.free_agv_positions[position] = [released_agv]
-        self.n_busy_agvs -= 1
-        self.n_free_agvs += 1
+            self.n_busy_agvs -= 1
+            self.n_free_agvs += 1
+        elif released_agv.available_forks > 0:
+            free_agvs_cp = self.free_agv_positions.copy()
+            for agv in free_agvs_cp:
+                index = 0
+                for current_agv in free_agvs_cp[agv]:
+                    if agv_id == current_agv.id:
+                        self.free_agv_positions[agv].pop(index)
+                        if len(self.free_agv_positions[agv]) == 0:
+                            del self.free_agv_positions[agv]
+                        if position in self.free_agv_positions:
+                            self.free_agv_positions[position].append(
+                                released_agv)
+                        else:
+                            self.free_agv_positions[position] = [released_agv]
+                        break
+                    index += 1
+        released_agv.available_forks = released_agv.forks
+        released_agv.servicing_order_type = None
 
-    def __get_close_agv(self, position: Tuple[int, int]) -> Tuple[int, int]:
+    def get_close_agv(self, position: Tuple[int, int], order_type: str)\
+            -> Tuple[int, int]:
         """
         Iterates over the free AGVs in the free_agv_positions and selects the
         one closest to the passed position with respect to euclidean distance.
@@ -210,13 +256,21 @@ class AgvManager:
         """
         selected_agv = None
         min_distance = inf
+        agv_index = 0
         for agv in self.free_agv_positions:
-            distance = hypot(position[0]-agv[0], position[1]-agv[1])
-            if distance < min_distance:
-                selected_agv = agv
-                min_distance = distance
+            # current_agv = self.free_agv_positions[agv][-1]
+            index = 0
+            for current_agv in self.free_agv_positions[agv]:
+                if current_agv.servicing_order_type == order_type or\
+                        current_agv.servicing_order_type is None:
+                    distance = hypot(position[0] - agv[0], position[1] - agv[1])
+                    if distance < min_distance:
+                        agv_index = index
+                        selected_agv = agv
+                        min_distance = distance
+                index += 1
         # assert selected_agv in self.free_agv_positions
-        return selected_agv
+        return selected_agv, agv_index
 
     def get_agv_locations(self) -> Dict[Tuple[int, int], List[AGV]]:
         """

@@ -1,5 +1,5 @@
 import time
-from typing import Tuple, List, Any
+from typing import Tuple, List, Any, Union
 
 import gym
 import numpy as np
@@ -10,8 +10,7 @@ from slapstack.core_state import State
 from slapstack.core_state_agv_manager import AGV
 from slapstack.core_state_lane_manager import LaneManager
 from slapstack.core_state_location_manager import LocationManager
-from slapstack.extensions import c_unravel
-from slapstack.helpers import faster_deepcopy
+from slapstack.helpers import faster_deepcopy, unravel
 from slapstack.core_logger import MatrixLogger
 from slapstack.core_events import EventManager, EventHandleInfo
 from slapstack.interface_input import Input
@@ -114,6 +113,7 @@ class SlapCore(gym.Env):
                              "directory path or an object of type 'SlapLogger' "
                              "as defined by the interface_templates.py module. "
                              "To deactivate logging pass the empty string.")
+        self.logger.set_state(self.state)
 
     # def __init_legal_actions(self):
     #     sc = self.state.sc
@@ -253,7 +253,7 @@ class SlapCore(gym.Env):
         self.state.add_orders(self.events.running)
         self._add_initial_pallets()
         assert self.events.running
-        self.logger.log_state(self.state)
+        self.logger.log_state()
         # self.add_silent_storage_state()
         # self.__init_legal_actions()
         self.step_no_action()
@@ -285,7 +285,8 @@ class SlapCore(gym.Env):
             self.print("~" * 150 + "\n" + "step no action \n" + "~" * 150)
             next_event = None
             # if there are serviceable queued events, take care of them first.
-            if (retrieval_ok or delivery_ok) and s.agv_manager.agv_available():
+            if (retrieval_ok or delivery_ok) and\
+                    s.agv_manager.agv_available(order_type=None, only_new=True):
                 next_event = e.pop_queued_event(s)
             if next_event is None:
                 if not e.running:
@@ -333,12 +334,18 @@ class SlapCore(gym.Env):
         self.state.trackers.update_time(elapsed_time)
         #  travel events need to be updated by time_to_simulate
         self.process_travel_events(elapsed_time)
-        if next_event.time > self.state.time:
-            self.state.time = next_event.time
+        # if next_event.time > self.state.time:
+        #     self.state.time = next_event.time
         # handle event and see if an action is needed and what data
         # structures should the next (or same) event be added to
-        event_queueing_info: EventHandleInfo = next_event.handle(self.state)
-        self.events.add_current_events(event_queueing_info)
+        if isinstance(next_event, DeliverySecondLeg) or\
+                isinstance(next_event, RetrievalSecondLeg)\
+                or isinstance(next_event, Delivery):
+            event_queueing_info: EventHandleInfo =\
+                next_event.handle(self.state, self)
+        else:
+            event_queueing_info: EventHandleInfo = next_event.handle(self.state)
+        self.events.add_current_events(event_queueing_info, self.state)
         self.update_prev_event_and_curr_order(
             next_event, event_queueing_info.queued_retrieval_order_to_add)
         self.print(self.state)
@@ -346,7 +353,7 @@ class SlapCore(gym.Env):
         if self.verbose:
             self.print_any_events()
         self.state.n_silent_steps += 1
-        self.logger.log_state(self.state)
+        self.logger.log_state()
         # self.add_silent_storage_state()
         return event_queueing_info.action_needed
 
@@ -365,7 +372,7 @@ class SlapCore(gym.Env):
         DeliverySecondLeg or RetrievalFirstLeg event, respectively. Updates
         event data structures, and executes step_no_action(). If the simulation
         is done afterwards, it can be ended here."""
-        action = c_unravel(action, self.inpt.params.shape)
+        action = unravel(action, self.inpt.params.shape)
         self.state.n_steps += 1
         self.__print_debug_info(tuple(action))
         travel_event = None
@@ -374,8 +381,8 @@ class SlapCore(gym.Env):
         elif self.decision_mode == "retrieval":
             travel_event = self.__create_event_on_retrieval(action)
         self.state.add_travel_event(travel_event)
-        self.events.add_travel_event(travel_event)
-        self.logger.log_state(self.state)
+        self.events.add_travel_event(travel_event, self.state)
+        self.logger.log_state()
         done_prematurely = self.step_no_action()
         return self.__has_ended(done_prematurely)
 
@@ -400,33 +407,87 @@ class SlapCore(gym.Env):
             self, action: Tuple[int, int, int]) -> DeliverySecondLeg:
         lm: LaneManager = self.state.location_manager.lane_manager
         prev_e: DeliveryFirstLeg = self.previous_event
-        if lm.pure_lanes:
+        state_cache_sink = self.state.location_manager.sink_location
+        self.state.location_manager.sink_location = None
+        retrieval_order: Retrieval = None
+        if state_cache_sink and\
+                unravel(state_cache_sink,
+                          self.state.location_manager.S.shape) == action:
+            agv: AGV = self.state.agv_manager.agv_index[prev_e.agv_id]
+            found_in_dcc_orders = False
+            for ret_dcc_order in agv.dcc_retrieval_order:
+                if ret_dcc_order.SKU == prev_e.order.SKU:
+                    found_in_dcc_orders = True
+                    retrieval_order = ret_dcc_order
+            if not found_in_dcc_orders:
+                retrieval_order = self.events.queued_retrieval_orders[
+                    prev_e.order.SKU].popleft()
+                self.events.n_queued_retrieval_orders -= 1
+            if len(self.events.queued_retrieval_orders[prev_e.order.SKU]) == 0:
+                del self.events.queued_retrieval_orders[prev_e.order.SKU]
+        if lm.pure_lanes and not retrieval_order:
             lm.add_lane_assignment(action, prev_e.order.SKU)
         travel_event = DeliverySecondLeg(
             state=self.state,
-            start_point=self.state.source_positions[prev_e.source],
+            start_point=prev_e.last_node,
             end_point=action[0:2],
             travel_type="delivery_second_leg",
             level=int(action[2]),
             source=prev_e.source,
+            orders=prev_e.orders,
             order=prev_e.order,
-            agv_id=prev_e.agv_id
+            agv_id=prev_e.agv_id,
+            servicing_retrieval_order=retrieval_order
         )
         return travel_event
 
     def __create_event_on_retrieval(
             self, action: Tuple[int, int, int]) -> RetrievalFirstLeg:
-        sc: LocationManager = self.state.location_manager
+        lm: LocationManager = self.state.location_manager
         prev_e: Retrieval = self.previous_event
-        agv: AGV = self.state.agv_manager.book_agv(action[0:2], self.state.time)
-        self.state.agv_manager.update_v_matrix(agv.position, None)
-        travel_event = RetrievalFirstLeg(
-            state=self.state, start_point=agv.position,
-            end_point=action[0:2],
-            travel_type="retrieval_first_leg",
-            level=int(action[2]),
-            sink=self.previous_event.sink,
-            order=prev_e, agv_id=agv.id)
+        agv_pos, index = self.state.agv_manager.get_close_agv(
+            action[0:2], prev_e.type)
+        agv: AGV = self.state.agv_manager.book_agv(
+            agv_pos, self.state.time, index, prev_e.type)
+        cross_dock = lm.source_location
+        lm.source_location = None
+        delivery_order: Union[Delivery, None] = None
+        # cross-docking action; agv will travel to the source to get ret pallet
+        if cross_dock and unravel(cross_dock, lm.S.shape) == action:
+            previous_sku = self.previous_event.SKU
+            delivery_order = self.events.queued_delivery_orders[
+                previous_sku].popleft()
+            self.events.n_queued_delivery_orders -= 1
+            if len(self.events.queued_delivery_orders[previous_sku]) == 0:
+                del self.events.queued_delivery_orders[previous_sku]
+
+        if len(agv.dcc_retrieval_order) == 0 and agv.forks > 1 and\
+                agv.available_forks < agv.forks - 1:
+            travel_event: RetrievalFirstLeg = self.events.find_travel_event(
+                agv.id, RetrievalFirstLeg)
+            self.events.remove_travel_event(travel_event)
+            self.events.running.remove(travel_event)
+            self.events.re_heapify_heap()
+            travel_event.orders.append(prev_e)
+            travel_event.actions.append(action)
+            if delivery_order is not None:
+                travel_event.delivery_orders = (
+                    travel_event.delivery_orders.append(delivery_order))
+            else:
+                lm.lock_lane(action[0:2])
+        else:
+            self.state.agv_manager.update_v_matrix(agv.position, None)
+            travel_event = RetrievalFirstLeg(
+                state=self.state, start_point=agv.position,
+                end_point=action[0:2],
+                travel_type="retrieval_first_leg",
+                level=int(action[2]),
+                sink=self.previous_event.sink,
+                orders=[prev_e],
+                order=prev_e,
+                actions=[action], agv_id=agv.id,
+                servicing_delivery_order=[delivery_order]
+                if delivery_order is not None else [])
         return travel_event
 
     def update_prev_event_and_curr_order(
@@ -435,13 +496,13 @@ class SlapCore(gym.Env):
         Updates the decision_mode and previous_event fields in the case of a
         blocking event.
 
-        The previous_event field is used to associate order information with 
+        The previous_event field is used to associate order information with
         travel events, on decisions. It only gets instantiated if the current_
         event is blocking, i.e. DeliveryFirstLeg or RetrievalOrder. After the
-        decision, the order information saved will be used to generate 
+        decision, the order information saved will be used to generate
         DeliverySecondLeg and RetreivalFirstLeg information events.
-         
-        :param this_event: The event to be saved if a decision is to be made in 
+
+        :param this_event: The event to be saved if a decision is to be made in
             the next step.
         :param queued_retrieval_order_to_add: The Retrieval that was added to
             the queue of currently unseviceable orders (event was unblocking and
@@ -459,6 +520,7 @@ class SlapCore(gym.Env):
                 self.previous_event = this_event
             if isinstance(this_event, DeliverySecondLeg):
                 self.SKU_counts[this_event.order.SKU] += 1
+                self.previous_event = this_event
         if (isinstance(this_event, Retrieval)
                 or isinstance(this_event, RetrievalFirstLeg)
                 or isinstance(this_event, RetrievalSecondLeg)):
@@ -471,7 +533,9 @@ class SlapCore(gym.Env):
 
     def process_travel_events(self, elapsed_time: float):
         """ if time has elapsed, update any currently active travel events"""
-        if self.events.current_travel and elapsed_time > 0:
+        if (self.events.current_travel
+                and elapsed_time > 0
+                and self.state.params.update_partial_paths):
             self.print("simulating travel events by " + str(elapsed_time))
             self.simulate_travel_events(elapsed_time)
 
@@ -492,8 +556,9 @@ class SlapCore(gym.Env):
 
         if self.events.queued_delivery_orders:
             self.print("currently queued delivery orders: ")
-            for i in self.events.queued_delivery_orders:
-                self.print("queued: " + str(i))
+            for i in self.events.queued_delivery_orders.values()():
+                for j in i:
+                    self.print("queued: " + str(j))
 
     def _add_initial_pallets(self):
         """ this function adds pallets/SKUs to the initial storage and arrival
@@ -547,7 +612,7 @@ class SlapCore(gym.Env):
             if self.orders.follow_storage_strategy():
                 index = self.orders.initial_pallets_storage_strategy.get_action(
                     self.state)
-                index = c_unravel(index, self.inpt.params.shape)
+                index = unravel(index, self.inpt.params.shape)
             else:
                 possible_locations = sc.get_open_locations(chosen_sku)
                 for agv in self.state.agv_manager.get_agv_locations():
@@ -556,7 +621,7 @@ class SlapCore(gym.Env):
                 assert len(possible_locations), 'warehouse full'
                 index = SlapCore.rng.integers(0, len(possible_locations))
                 index = list(possible_locations)[index]
-                index = c_unravel(index, self.inpt.params.shape)
+                index = unravel(index, self.inpt.params.shape)
             assert len(index) == 3
             # TODO: Add randomization for initial pallets
             batch_id += np.float32(0.0001)
@@ -612,8 +677,14 @@ class SlapCore(gym.Env):
             self.state.set_current_sku(prev_e.order.SKU)
             self.state.set_current_source_sink(prev_e.source)
             self.state.set_current_order_arrival_time(prev_e.order.time)
+            self.state.set_current_destination(prev_e.order.destination)
         legal_actions = self.state.location_manager.get_open_locations(
             self.state.current_sku)
+        if self.state.door_to_door:
+            legal_sink = self.state.location_manager.get_direct_sink_action(
+                self.state.current_sku)
+            if legal_sink is not None:
+                legal_actions.add(legal_sink)
         self.state.set_current_order(self.decision_mode)
         self.state.set_legal_actions(legal_actions)
         # converts tuple legal actions to linear index
@@ -653,16 +724,30 @@ class SlapCore(gym.Env):
                 order_type, sku, arrival_time, source_sink, batch = order[:-1]
                 period = order[-1]
                 source_sink -= 1
+            elif len(order) == 7:
+                order_type, sku, arrival_time, source_sink, destination, batch\
+                    = order[:-1]
+                period = order[-1]
+                source_sink -= 1
+                destination -= 1
             else:
                 raise ValueError("Unknown Order Structure!")
             if order_type == "retrieval":
                 self.events.add_future_event(
                     Retrieval(arrival_time, sku, order_number,
-                              self.verbose, source_sink, batch, period))
+                              self.verbose, source_sink, batch, period),
+                    self.state)
             elif order_type == "delivery":
-                self.events.add_future_event(
-                    Delivery(arrival_time, sku, order_number,
-                             self.verbose, source_sink, batch, period))
+                if len(order) == 6:
+                    self.events.add_future_event(
+                        Delivery(arrival_time, sku, order_number,
+                                 self.verbose, source_sink, batch, period),
+                    self.state)
+                elif len(order) == 7:
+                    self.events.add_future_event(
+                        Delivery(arrival_time, sku, order_number,
+                                 self.verbose, source_sink, batch, period,
+                                 destination), self.state)
             order_number += 1
         self.events.order_times = [i.time for i in self.events.running]
         self.print("")

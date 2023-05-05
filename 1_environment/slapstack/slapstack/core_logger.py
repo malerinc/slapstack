@@ -21,9 +21,9 @@ class MatrixLogger(SlapLogger):
         else:
             self.on = False
 
-    def log_state(self, state: State):
+    def log_state(self):
         if self.on:
-            self.__write_heatmaps(state)
+            self.__write_heatmaps(self.slap_state)
 
     def __write_heatmaps(self, state: State):
         """
